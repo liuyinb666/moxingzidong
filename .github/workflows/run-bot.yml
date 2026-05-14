@@ -1,0 +1,20 @@
+name: PC28 Bot
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install
+        run: pip install aiohttp aiofiles numpy python-telegram-bot telethon
+      - name: Run
+        run: python auto_3.3.py
