@@ -420,7 +420,7 @@ class BetParams:
     stop_win: int = Config.DEFAULT_STOP_WIN
     stop_balance: int = Config.DEFAULT_STOP_BALANCE
     resume_balance: int = Config.DEFAULT_RESUME_BALANCE
-    dynamic_base_ratio: float = 0.03  # 新增：动态投注比例
+    dynamic_base_ratio: float = 0.05  # 新增：动态投注比例
 
 @dataclass
 class Account:
