@@ -32,7 +32,7 @@ class Config:
     CACHE_SIZE = 200
     DEFAULT_BASE_AMOUNT = 20000
     DEFAULT_MAX_AMOUNT = 1000000
-    DEFAULT_MULTIPLIER = 2.0
+    DEFAULT_MULTIPLIER = 2.5
     DEFAULT_STOP_LOSS = 0
     DEFAULT_STOP_WIN = 0
     DEFAULT_STOP_BALANCE = 0
@@ -420,7 +420,7 @@ class BetParams:
     stop_win: int = Config.DEFAULT_STOP_WIN
     stop_balance: int = Config.DEFAULT_STOP_BALANCE
     resume_balance: int = Config.DEFAULT_RESUME_BALANCE
-    dynamic_base_ratio: float = 0.0  # 新增：动态投注比例
+    dynamic_base_ratio: float = 0.03  # 新增：动态投注比例
 
 @dataclass
 class Account:
