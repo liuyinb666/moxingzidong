@@ -1,4 +1,5 @@
 name: PC28 Bot
+
 on:
   push:
     branches: [main]
@@ -18,3 +19,7 @@ jobs:
         run: pip install aiohttp aiofiles numpy python-telegram-bot telethon
       - name: Run
         run: python auto_3.3.py
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          API_ID: ${{ secrets.API_ID }}
+          API_HASH: ${{ secrets.API_HASH }}
