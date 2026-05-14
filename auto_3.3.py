@@ -21,7 +21,7 @@ from telethon.errors import SessionPasswordNeededError, FloodWaitError, PhoneCod
 class Config:
     BOT_TOKEN = os.getenv("BOT_TOKEN")
     API_ID = int(os.getenv("API_ID", 0))
-    API_HASH = os.getenv("API_HASH")"
+    API_HASH = os.getenv("API_HASH")
     PC28_API_BASE = "https://pc28.help/api/kj.json?nbr=500"
     ADMIN_USER_IDS = [5338954122]
     DATA_DIR = Path("data")
