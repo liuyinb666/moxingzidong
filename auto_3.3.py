@@ -1111,13 +1111,6 @@ class PC28Bot:
         elif data.startswith("select_account:"):
             phone = data.split(':')[1]
             await self._show_account_detail(query, user, phone)
-        elif data.startswith("amount_menu:"):
-            phone = data.split(':')[1]
-            await self._show_amount_menu(query, user, phone, context)
-        elif data.startswith("amount_set:"):
-            parts = data.split(':')
-            param_name, phone = parts[1], parts[2]
-            await self._amount_set_callback(query, user, phone, param_name, context)
         elif data.startswith("action:"):
             parts = data.split(':')
             action, phone = parts[1], parts[2]
@@ -1164,59 +1157,6 @@ class PC28Bot:
         kb.append([InlineKeyboardButton("🔙 返回", callback_data="menu:main")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-    async def _show_amount_menu(self, query, user, phone, context):
-        acc = self.account_manager.get_account(phone)
-        if not acc:
-            await query.edit_message_text("❌ 账户不存在")
-            return
-
-        text = f"""
-💰 *金额设置*
-
-📱 账户: {acc.get_display_name()}
-💱 币种: {acc.currency}
-
-当前设置:
-• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}
-• 最大金额: {format_amount(acc.bet_params.max_amount, acc.currency)}
-• 止损金额: {format_amount(acc.bet_params.stop_loss, acc.currency)}
-• 止盈金额: {format_amount(acc.bet_params.stop_win, acc.currency)}
-• 停止余额: {format_amount(acc.bet_params.stop_balance, acc.currency)}
-• 恢复余额: {format_amount(acc.bet_params.resume_balance, acc.currency)}
-
-请选择需要修改的金额类型：
-        """
-        kb = [
-            [InlineKeyboardButton("💰 基础金额", callback_data=f"amount_set:base_amount:{phone}"),
-             InlineKeyboardButton("💎 最大金额", callback_data=f"amount_set:max_amount:{phone}")],
-            [InlineKeyboardButton("🛑 停止余额", callback_data=f"amount_set:stop_balance:{phone}"),
-             InlineKeyboardButton("⛔ 止损金额", callback_data=f"amount_set:stop_loss:{phone}")],
-            [InlineKeyboardButton("✅ 止盈金额", callback_data=f"amount_set:stop_win:{phone}"),
-             InlineKeyboardButton("🔄 恢复余额", callback_data=f"amount_set:resume_balance:{phone}")],
-            [InlineKeyboardButton("🔙 返回账户详情", callback_data=f"select_account:{phone}")],
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-
-    async def _amount_set_callback(self, query, user, phone, param_name, context):
-        param_names = {
-            'base_amount': '基础金额',
-            'max_amount': '最大金额',
-            'stop_balance': '停止余额',
-            'stop_loss': '止损金额',
-            'stop_win': '止盈金额',
-            'resume_balance': '恢复余额',
-        }
-        display_name = param_names.get(param_name, param_name)
-        self.account_manager.set_user_state(user, 'account_selected', {'current_account': phone})
-        await self.account_manager.update_account(phone, input_mode=param_name, input_buffer='')
-
-        acc = self.account_manager.get_account(phone)
-        symbol = acc.get_currency_symbol() if acc else ""
-        text = f"🔢 请输入新的 {display_name}（单位：{symbol}）："
-
-        kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"amount_menu:{phone}")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-
     async def _show_account_detail(self, query_or_message, user, phone):
         self.account_manager.set_user_state(user, 'account_selected', {'current_account': phone})
         acc = self.account_manager.get_account(phone)
@@ -1234,9 +1174,8 @@ class PC28Bot:
             [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
              InlineKeyboardButton("🚪 登出", callback_data=f"action:logout:{phone}")],
             [InlineKeyboardButton("💬 游戏群", callback_data=f"action:listgroups:{phone}")],
-            [InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}")],
-            [InlineKeyboardButton("💱 投注币种", callback_data=f"action:setcurrency:{phone}"),
-             InlineKeyboardButton("💰 金额设置", callback_data=f"amount_menu:{phone}")],
+            [InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}"),
+             InlineKeyboardButton("💱 投注币种", callback_data=f"action:setcurrency:{phone}")],
             [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}")],
             [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"),
              InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
