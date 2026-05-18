@@ -60,8 +60,18 @@ class Config:
     MAX_ACCOUNTS_PER_USER = 5
     PREDICTION_HISTORY_SIZE = 20
     RISK_PROFILES = {'保守': 0.005, '稳定': 0.01, '激进': 0.02, '稳健型': 0.008, '平衡型': 0.015, '进取型': 0.03}
-    RECOMMEND_BASE_RISK = 0.01
-    RECOMMEND_RISK_RANGE = 0.02
+    AVAILABLE_CURRENCIES = ["KKCOIN", "USDT", "CNY"]
+    DEFAULT_CURRENCY = "KKCOIN"
+    CURRENCY_BET_LIMITS = {
+        "KKCOIN": {"min": 1, "max": 10000000},
+        "USDT": {"min": 0.01, "max": 100},
+        "CNY": {"min": 0.1, "max": 1000}
+    }
+    CURRENCY_SYMBOLS = {
+        "KKCOIN": "KK",
+        "USDT": "USDT",
+        "CNY": "¥"
+    }
 
     @classmethod
     def init_dirs(cls):
@@ -92,6 +102,13 @@ def increment_qihao(current_qihao: str) -> str:
     else:
         try: return str(int(current_qihao) + 1)
         except: return current_qihao + "1"
+
+def format_amount(amount: float, currency: str) -> str:
+    symbol = Config.CURRENCY_SYMBOLS.get(currency, "")
+    if currency == "KKCOIN":
+        return f"{int(amount):,}{symbol}"
+    else:
+        return f"{amount:.2f}{symbol}"
 
 class ColoredFormatter(logging.Formatter):
     grey, green, red, yellow, blue, reset = "\x1b[38;20m", "\x1b[32;20m", "\x1b[31;20m", "\x1b[33;20m", "\x1b[34;20m", "\x1b[0m"
@@ -258,7 +275,7 @@ ALL_MODELS[701] = {"func": lambda h: algo_v23_armor(h)[0], "info": {"id": 701, "
 class ModelManager:
     def __init__(self):
         self.all_models = ALL_MODELS
-    
+
     def predict_kill(self, history):
         if len(history) < 10: return "小单"
         best_id, best_rate = None, 0
@@ -413,14 +430,13 @@ class PC28API:
 # ==================== 数据模型 ====================
 @dataclass
 class BetParams:
-    base_amount: int = Config.DEFAULT_BASE_AMOUNT
-    max_amount: int = Config.DEFAULT_MAX_AMOUNT
+    base_amount: float = Config.DEFAULT_BASE_AMOUNT
+    max_amount: float = Config.DEFAULT_MAX_AMOUNT
     multiplier: float = Config.DEFAULT_MULTIPLIER
-    stop_loss: int = Config.DEFAULT_STOP_LOSS
-    stop_win: int = Config.DEFAULT_STOP_WIN
-    stop_balance: int = Config.DEFAULT_STOP_BALANCE
-    resume_balance: int = Config.DEFAULT_RESUME_BALANCE
-    dynamic_base_ratio: float = 0.05  # 新增：动态投注比例
+    stop_loss: float = Config.DEFAULT_STOP_LOSS
+    stop_win: float = Config.DEFAULT_STOP_WIN
+    stop_balance: float = Config.DEFAULT_STOP_BALANCE
+    resume_balance: float = Config.DEFAULT_RESUME_BALANCE
 
 @dataclass
 class Account:
@@ -437,7 +453,6 @@ class Account:
     prediction_group_id: int = 0
     prediction_group_name: str = ""
     betting_strategy: str = "保守"
-    betting_scheme: str = "杀主"
     bet_params: BetParams = field(default_factory=BetParams)
     balance: float = 0
     initial_balance: float = 0
@@ -450,8 +465,8 @@ class Account:
     last_bet_time: Optional[str] = None
     last_bet_period: Optional[str] = None
     last_bet_types: List[str] = field(default_factory=list)
-    last_bet_amount: int = 0
-    last_bet_total: int = 0
+    last_bet_amount: float = 0
+    last_bet_total: float = 0
     last_prediction: Dict = field(default_factory=dict)
     input_mode: Optional[str] = None
     input_buffer: str = ""
@@ -472,14 +487,21 @@ class Account:
     current_streak_count_double: int = 0
     current_streak_type_kill: Optional[str] = None
     current_streak_count_kill: int = 0
-    recommend_mode: bool = False
     risk_profile: str = "稳定"
     last_message_id: Optional[int] = None
     prediction_content: str = "kill"
     broadcast_stop_requested: bool = False
+    currency: str = Config.DEFAULT_CURRENCY
 
     def get_display_name(self) -> str:
         return self.display_name if self.display_name else self.phone
+
+    def get_currency_symbol(self) -> str:
+        return Config.CURRENCY_SYMBOLS.get(self.currency, "")
+
+    def get_bet_limits(self) -> Tuple[float, float]:
+        limits = Config.CURRENCY_BET_LIMITS.get(self.currency, {"min": 1, "max": 10000000})
+        return limits["min"], limits["max"]
 
     def get_risk_factor(self) -> float:
         return Config.RISK_PROFILES.get(self.risk_profile, 0.01)
@@ -498,134 +520,145 @@ class AccountManager:
         self.balance_cache: Dict[str, Dict] = {}
         self._dirty: Set[str] = set()
         self._save_task: Optional[asyncio.Task] = None
-        self.load_accounts()
-        self.load_user_states()
-        logger.log_system(f"账户管理器初始化完成,已加载 {len(self.accounts)} 个账户")
+        self.load_data()
+        logger.log_system("账户管理器初始化完成")
 
-    def load_accounts(self):
-        if self.accounts_file.exists():
-            try:
+    def load_data(self):
+        try:
+            if self.accounts_file.exists():
                 with open(self.accounts_file, 'r', encoding='utf-8') as f:
                     data = json.load(f)
-                for phone, acc_dict in data.items():
-                    bet_params_dict = acc_dict.get('bet_params', {})
-                    bet_params_filtered = {k: v for k, v in bet_params_dict.items() if k in BetParams.__dataclass_fields__}
-                    # 确保 dynamic_base_ratio 字段存在
-                    if 'dynamic_base_ratio' not in bet_params_filtered:
-                        bet_params_filtered['dynamic_base_ratio'] = 0.0
-                    bet_params = BetParams(**bet_params_filtered)
-                    acc_dict['bet_params'] = bet_params
-                    for key in ['is_listening', 'needs_2fa', 'login_temp_data', 'chase_enabled', 'chase_numbers', 'chase_periods', 'chase_current', 'chase_amount', 'chase_stop_reason', 'recommend_mode', 'risk_profile', 'streak_records_double', 'streak_records_kill', 'current_streak_type_double', 'current_streak_count_double', 'current_streak_type_kill', 'current_streak_count_kill', 'last_message_id', 'prediction_content', 'broadcast_stop_requested']:
-                        if key not in acc_dict: acc_dict[key] = False if 'enabled' in key or 'mode' in key else ([] if 'records' in key or 'numbers' in key else (0 if 'count' in key or 'current' in key else ("kill" if key == 'prediction_content' else None)))
-                    self.accounts[phone] = Account(**{k: v for k, v in acc_dict.items() if k in Account.__dataclass_fields__})
-            except Exception as e: logger.log_error(0, "加载账户数据失败", e)
-
-    async def save_accounts(self):
-        data = {}
-        for phone, acc in self.accounts.items():
-            acc_dict = asdict(acc)
-            data[phone] = acc_dict
-        try:
-            async with aiofiles.open(self.accounts_file, 'w', encoding='utf-8') as f:
-                await f.write(json.dumps(data, ensure_ascii=False, indent=2))
-        except Exception as e: logger.log_error(0, "保存账户数据失败", e)
+                for phone, acc_data in data.items():
+                    bet_params_data = acc_data.pop('bet_params', {})
+                    bet_params = BetParams(**bet_params_data)
+                    acc_data['bet_params'] = bet_params
+                    if 'currency' not in acc_data:
+                        acc_data['currency'] = Config.DEFAULT_CURRENCY
+                    self.accounts[phone] = Account(**acc_data)
+            if self.user_states_file.exists():
+                with open(self.user_states_file, 'r', encoding='utf-8') as f:
+                    self.user_states = {int(k): v for k, v in json.load(f).items()}
+        except Exception as e:
+            logger.log_error(0, "加载账户数据失败", e)
+            self.accounts = {}
+            self.user_states = {}
 
     async def _periodic_save(self):
         while True:
-            await asyncio.sleep(Config.ACCOUNT_SAVE_INTERVAL)
-            dirty = None
-            async with self.update_lock:
-                if self._dirty: dirty = self._dirty.copy(); self._dirty.clear()
-            if dirty: await self.save_accounts()
-
-    def load_user_states(self):
-        if self.user_states_file.exists():
             try:
-                with open(self.user_states_file, 'r', encoding='utf-8') as f: self.user_states = json.load(f)
-            except: pass
+                await asyncio.sleep(Config.ACCOUNT_SAVE_INTERVAL)
+                await self.save_data()
+            except asyncio.CancelledError:
+                await self.save_data()
+                break
+            except Exception as e:
+                logger.log_error(0, "定期保存失败", e)
 
-    def save_user_states(self):
-        try:
-            with open(self.user_states_file, 'w', encoding='utf-8') as f: json.dump(self.user_states, f, ensure_ascii=False, indent=2)
-        except: pass
-
-    async def add_account(self, user_id, phone) -> Tuple[bool, str]:
+    async def save_data(self):
         async with self.update_lock:
-            if user_id not in Config.ADMIN_USER_IDS:
-                user_accounts = [acc for acc in self.accounts.values() if acc.owner_user_id == user_id]
-                if len(user_accounts) >= Config.MAX_ACCOUNTS_PER_USER: return False, f"最多只能添加 {Config.MAX_ACCOUNTS_PER_USER} 个账户"
-            if phone in self.accounts: return False, "账户已存在"
-            if not re.match(r'^\+\d{10,15}$', phone): return False, "手机号格式不正确,需包含国际区号"
-            self.accounts[phone] = Account(phone=phone, owner_user_id=user_id)
+            try:
+                data = {}
+                for phone, acc in self.accounts.items():
+                    acc_dict = asdict(acc)
+                    acc_dict['bet_params'] = asdict(acc.bet_params)
+                    data[phone] = acc_dict
+                with open(self.accounts_file, 'w', encoding='utf-8') as f:
+                    json.dump(data, f, ensure_ascii=False, indent=2)
+                with open(self.user_states_file, 'w', encoding='utf-8') as f:
+                    json.dump(self.user_states, f, ensure_ascii=False, indent=2)
+                self._dirty.clear()
+            except Exception as e:
+                logger.log_error(0, "保存账户数据失败", e)
+
+    def get_account(self, phone: str) -> Optional[Account]:
+        return self.accounts.get(phone)
+
+    def get_user_accounts(self, user_id: int) -> List[Account]:
+        return [acc for acc in self.accounts.values() if acc.owner_user_id == user_id]
+
+    async def add_account(self, user_id: int, phone: str) -> Tuple[bool, str]:
+        phone = phone.strip()
+        if not phone.startswith('+'):
+            return False, "手机号必须包含国际区号(如+86)"
+        if phone in self.accounts:
+            return False, "该账户已存在"
+        user_accounts = self.get_user_accounts(user_id)
+        if len(user_accounts) >= Config.MAX_ACCOUNTS_PER_USER:
+            return False, f"每个用户最多添加{Config.MAX_ACCOUNTS_PER_USER}个账户"
+        acc = Account(phone=phone, owner_user_id=user_id)
+        self.accounts[phone] = acc
+        self.account_locks[phone] = asyncio.Lock()
+        await self.save_data()
+        logger.log_account(user_id, phone, "添加账户")
+        return True, "账户添加成功"
+
+    async def update_account(self, phone: str, **kwargs):
+        async with self.account_locks.setdefault(phone, asyncio.Lock()):
+            acc = self.accounts.get(phone)
+            if not acc:
+                return False
+            for key, value in kwargs.items():
+                if key == 'bet_params' and isinstance(value, dict):
+                    for bp_key, bp_value in value.items():
+                        if hasattr(acc.bet_params, bp_key):
+                            setattr(acc.bet_params, bp_key, bp_value)
+                elif hasattr(acc, key):
+                    setattr(acc, key, value)
             self._dirty.add(phone)
-            return True, f"账户 {phone} 添加成功"
+        return True
 
-    def get_account(self, phone) -> Optional[Account]: return self.accounts.get(phone)
+    def set_user_state(self, user_id: int, key: str, value: Any):
+        if user_id not in self.user_states:
+            self.user_states[user_id] = {}
+        self.user_states[user_id][key] = value
 
-    async def update_account(self, phone, **kwargs):
-        async with self.update_lock:
-            if phone not in self.account_locks: self.account_locks[phone] = asyncio.Lock()
-        async with self.account_locks[phone]:
-            if phone in self.accounts:
-                acc = self.accounts[phone]
-                for k, v in kwargs.items():
-                    if k == 'bet_params' and isinstance(v, dict):
-                        for pk, pv in v.items(): setattr(acc.bet_params, pk, pv)
-                    else: setattr(acc, k, v)
-                async with self.update_lock: self._dirty.add(phone)
-                return True
-            return False
+    def get_user_state(self, user_id: int, key: str, default=None):
+        return self.user_states.get(user_id, {}).get(key, default)
 
-    def get_user_accounts(self, user_id): return [acc for acc in self.accounts.values() if acc.owner_user_id == user_id]
-
-    def set_user_state(self, user_id, state, data=None):
-        self.user_states.setdefault(user_id, {})
-        self.user_states[user_id]['state'] = state
-        if data: self.user_states[user_id].update(data)
-        self.user_states[user_id]['last_update'] = datetime.now().isoformat()
-        self.save_user_states()
-
-    def get_user_state(self, user_id): return self.user_states.get(user_id, {})
-
-    def set_login_session(self, phone, session_data): self.login_sessions[phone] = session_data
-    def get_login_session(self, phone): return self.login_sessions.get(phone)
-
-    def create_client(self, phone):
+    def create_client(self, phone: str) -> Optional[TelegramClient]:
+        if phone in self.clients:
+            return self.clients[phone]
         try:
             session_name = phone.replace('+', '')
             session_path = Config.SESSIONS_DIR / session_name
             client = TelegramClient(str(session_path), Config.API_ID, Config.API_HASH)
             self.clients[phone] = client
             return client
-        except Exception as e: logger.log_error(0, f"创建客户端失败 {phone}", e); return None
+        except Exception as e:
+            logger.log_error(0, f"创建客户端失败 {phone}", e)
+            return None
 
-    async def ensure_client_connected(self, phone):
+    async def ensure_client_connected(self, phone: str) -> bool:
         client = self.clients.get(phone)
         if not client:
-            await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
+            client = self.create_client(phone)
+        if not client:
             return False
-        if not client.is_connected():
-            try: await client.connect()
-            except: await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False); return False
         try:
-            if not await client.is_user_authorized():
-                await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False)
-                return False
-        except: await self.update_account(phone, is_logged_in=False, auto_betting=False, prediction_broadcast=False); return False
-        return True
-
-    def get_cached_balance(self, phone):
-        cache = self.balance_cache.get(phone)
-        if cache and (datetime.now() - cache['time']).seconds < Config.BALANCE_CACHE_SECONDS: return cache['balance']
-        return None
-
-    def update_balance_cache(self, phone, balance): self.balance_cache[phone] = {'balance': balance, 'time': datetime.now()}
+            if not client.is_connected():
+                await client.connect()
+            return await client.is_user_authorized()
+        except Exception as e:
+            logger.log_error(0, f"检查客户端连接失败 {phone}", e)
+            return False
 
     async def verify_login_status(self):
-        for phone, acc in self.accounts.items():
+        for phone, acc in list(self.accounts.items()):
             if acc.is_logged_in:
-                if not await self.ensure_client_connected(phone):
-                    logger.log_system(f"账户 {phone} 连接失效")
+                connected = await self.ensure_client_connected(phone)
+                if not connected:
+                    await self.update_account(phone, is_logged_in=False)
+                    logger.log_account(acc.owner_user_id, phone, "登录状态验证失败，已重置")
+
+    def get_cached_balance(self, phone: str) -> Optional[float]:
+        cache = self.balance_cache.get(phone)
+        if cache:
+            if (datetime.now() - cache['time']).seconds < Config.BALANCE_CACHE_SECONDS:
+                return cache['balance']
+        return None
+
+    def update_balance_cache(self, phone: str, balance: float):
+        self.balance_cache[phone] = {'balance': balance, 'time': datetime.now()}
 
     async def reset_auto_flags_on_start(self):
         for phone, acc in self.accounts.items():
@@ -640,32 +673,33 @@ class AccountManager:
         try: await self._save_task
         except asyncio.CancelledError: pass
 
-# ==================== 金额管理器（新增） ====================
+# ==================== 金额管理器 ====================
 class AmountManager:
     def __init__(self, account_manager):
         self.account_manager = account_manager
 
     async def set_param(self, phone, param_name, amount, user_id):
-        if amount < 0: 
+        if amount < 0:
             return False, "金额不能为负数"
         acc = self.account_manager.get_account(phone)
-        if not acc: 
+        if not acc:
             return False, "账户不存在"
-        
+
+        min_limit, max_limit = acc.get_bet_limits()
         if param_name in ['base_amount', 'max_amount']:
-            if amount < Config.MIN_BET_AMOUNT:
-                return False, f"金额不能小于 {Config.MIN_BET_AMOUNT} KK"
-            if amount > Config.MAX_BET_AMOUNT:
-                return False, f"金额不能大于 {Config.MAX_BET_AMOUNT} KK"
-        
-        valid_params = ['base_amount', 'max_amount', 'stop_loss', 'stop_win', 'stop_balance', 'resume_balance', 'dynamic_base_ratio']
-        if param_name not in valid_params: 
+            if amount < min_limit:
+                return False, f"金额不能小于 {min_limit}{acc.get_currency_symbol()}"
+            if amount > max_limit:
+                return False, f"金额不能大于 {max_limit}{acc.get_currency_symbol()}"
+
+        valid_params = ['base_amount', 'max_amount', 'stop_loss', 'stop_win', 'stop_balance', 'resume_balance']
+        if param_name not in valid_params:
             return False, f"无效参数，可选: {', '.join(valid_params)}"
         if param_name == 'base_amount' and amount > acc.balance:
-            return False, f"基础金额不能超过当前余额 {acc.balance:.0f} KK"
+            return False, f"基础金额不能超过当前余额 {format_amount(acc.balance, acc.currency)}"
         await self.account_manager.update_account(phone, bet_params={param_name: amount})
-        logger.log_betting(user_id, "设置金额参数", f"账户:{phone} {param_name}={amount} KK")
-        return True, f"{param_name} 已设置为 {amount} KK"
+        logger.log_betting(user_id, "设置金额参数", f"账户:{phone} {param_name}={amount}{acc.get_currency_symbol()}")
+        return True, f"{param_name} 已设置为 {format_amount(amount, acc.currency)}"
 
 # ==================== 策略管理器 ====================
 class BettingStrategyManager:
@@ -676,18 +710,12 @@ class BettingStrategyManager:
             '平衡': {'description': '平衡策略', 'base_amount': 50000, 'max_amount': 500000, 'multiplier': 2.0, 'stop_loss': 500000, 'stop_win': 250000, 'stop_balance': 100000, 'resume_balance': 500000},
             '激进': {'description': '激进策略', 'base_amount': 100000, 'max_amount': 1000000, 'multiplier': 2.5, 'stop_loss': 1000000, 'stop_win': 500000, 'stop_balance': 200000, 'resume_balance': 1000000},
         }
-        self.schemes = {'组合1': '投注第1推荐', '组合2': '投注第2推荐', '组合1+2': '同时投注1、2', '杀主': '投注除最不可能外的所有组合'}
 
     async def set_strategy(self, phone, strategy_name, user_id):
         if strategy_name not in self.strategies: return False, "无效策略"
         cfg = self.strategies[strategy_name]
         await self.account_manager.update_account(phone, betting_strategy=strategy_name, risk_profile=strategy_name, bet_params={'base_amount': cfg['base_amount'], 'max_amount': cfg['max_amount'], 'multiplier': cfg['multiplier'], 'stop_loss': cfg['stop_loss'], 'stop_win': cfg['stop_win'], 'stop_balance': cfg.get('stop_balance', 0), 'resume_balance': cfg.get('resume_balance', 100000)})
         return True, f"已设置为: {strategy_name}"
-
-    async def set_scheme(self, phone, scheme_name, user_id):
-        if scheme_name not in self.schemes: return False, "无效方案"
-        await self.account_manager.update_account(phone, betting_scheme=scheme_name)
-        return True, f"投注方案已设置为: {scheme_name}"
 
 # ==================== 游戏调度器 ====================
 class GameScheduler:
@@ -719,35 +747,37 @@ class GameScheduler:
         current_qihao = latest.get('qihao')
         if acc.last_bet_period == current_qihao: return
 
-        # 计算基础金额（支持动态比例）
+        # 获取当前余额
         current_balance = await self.get_balance(phone)
         if current_balance is None:
             current_balance = acc.balance
-        
+
+        # 使用基础金额
         base_amount = acc.bet_params.base_amount
-        if acc.bet_params.dynamic_base_ratio > 0 and current_balance > 0:
-            base_amount = int(current_balance * acc.bet_params.dynamic_base_ratio)
-            base_amount = max(base_amount, Config.MIN_BET_AMOUNT)
-            base_amount = min(base_amount, acc.bet_params.max_amount)
-            logger.log_betting(0, "动态基础金额", f"账户:{phone} 余额:{current_balance:.0f} 比例:{acc.bet_params.dynamic_base_ratio*100:.0f}% 基础金额:{base_amount}")
 
         # 计算倍投乘数:根据连输次数进行乘机
         current_multiplier = 1.0
         if acc.consecutive_losses > 0:
             current_multiplier = acc.bet_params.multiplier ** acc.consecutive_losses
 
+        # 获取币种限额
+        min_limit, max_limit = acc.get_bet_limits()
+
         # 获取除杀组外的所有组合
         bet_types = [c for c in COMBOS if c != kill_target]
         bet_parts = []
         total_bet_amount = 0
-        
+
         for t in bet_types:
-            # 使用统一的基础金额
-            calculated_amount = int(base_amount * current_multiplier)
-            calculated_amount = min(calculated_amount, acc.bet_params.max_amount)
-            calculated_amount = max(calculated_amount, Config.MIN_BET_AMOUNT)
-            
-            # 格式: 大双63000
+            calculated_amount = base_amount * current_multiplier
+            calculated_amount = min(calculated_amount, max_limit)
+            calculated_amount = max(calculated_amount, min_limit)
+            # 币种精度处理
+            if acc.currency != "KKCOIN":
+                calculated_amount = round(calculated_amount, 2)
+            else:
+                calculated_amount = int(calculated_amount)
+
             bet_parts.append(f"{t}{calculated_amount}")
             total_bet_amount += calculated_amount
 
@@ -760,20 +790,19 @@ class GameScheduler:
             await client.send_message(gid, message)
             self.game_stats['successful_bets'] += 1
             self.game_stats['betting_cycles'] += 1
-            
-            # 记录数据供下期结算使用
+
             await self.account_manager.update_account(
-                phone, 
-                last_bet_time=datetime.now().isoformat(), 
-                last_bet_amount=total_bet_amount, 
-                last_bet_types=bet_types, 
-                total_bets=acc.total_bets + 1, 
-                last_bet_total=total_bet_amount, 
-                last_prediction={'kill': kill_target}, 
+                phone,
+                last_bet_time=datetime.now().isoformat(),
+                last_bet_amount=total_bet_amount,
+                last_bet_types=bet_types,
+                total_bets=acc.total_bets + 1,
+                last_bet_total=total_bet_amount,
+                last_prediction={'kill': kill_target},
                 last_bet_period=current_qihao,
                 balance=current_balance
             )
-            logger.log_betting(0, "投注成功", f"账户:{phone} 连输:{acc.consecutive_losses} 倍率:{current_multiplier:.1f}\n{message}")
+            logger.log_betting(0, "投注成功", f"账户:{phone} 币种:{acc.currency} 每注:{format_amount(base_amount * current_multiplier, acc.currency)} 总金额:{format_amount(total_bet_amount, acc.currency)}\n{message}")
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
         except Exception as e:
@@ -784,22 +813,31 @@ class GameScheduler:
         cached = self.account_manager.get_cached_balance(phone)
         if cached is not None: return cached
         client = self.account_manager.clients.get(phone)
-        if not client or not await self.account_manager.ensure_client_connected(phone): return None
+        acc = self.account_manager.get_account(phone)
+        if not client or not acc or not await self.account_manager.ensure_client_connected(phone): return None
         try:
             await client.send_message(Config.BALANCE_BOT, "/start")
             await asyncio.sleep(2)
             msgs = await client.get_messages(Config.BALANCE_BOT, limit=5)
+            balances = {'KKCOIN': 0.0, 'USDT': 0.0, 'CNY': 0.0}
             for msg in msgs:
-                if msg.text and 'KKCOIN' in msg.text.upper():
-                    for pat in [r'💰\s*KKCOIN\s*[::]\s*([\d,]+\.?\d*)', r'([\d,]+\.?\d*)\s*KKCOIN']:
-                        m = re.search(pat, msg.text, re.IGNORECASE)
-                        if m:
-                            try:
-                                balance = float(m.group(1).replace(',', ''))
-                                self.account_manager.update_balance_cache(phone, balance)
-                                await self.account_manager.update_account(phone, balance=balance)
-                                return balance
-                            except: continue
+                if msg.text:
+                    kk_match = re.search(r'KKCOIN\s*[:：]\s*([\d,]+\.?\d*)', msg.text, re.IGNORECASE)
+                    if kk_match:
+                        balances['KKCOIN'] = float(kk_match.group(1).replace(',', ''))
+                    usdt_match = re.search(r'USDT\s*[:：]\s*([\d,]+\.?\d*)', msg.text, re.IGNORECASE)
+                    if usdt_match:
+                        balances['USDT'] = float(usdt_match.group(1).replace(',', ''))
+                    cny_match = re.search(r'CNY\s*[:：]\s*([\d,]+\.?\d*)', msg.text, re.IGNORECASE)
+                    if cny_match:
+                        balances['CNY'] = float(cny_match.group(1).replace(',', ''))
+                    if balances['KKCOIN'] > 0 or balances['USDT'] > 0 or balances['CNY'] > 0:
+                        break
+            selected_balance = balances.get(acc.currency, 0)
+            if selected_balance > 0:
+                self.account_manager.update_balance_cache(phone, selected_balance)
+                await self.account_manager.update_account(phone, balance=selected_balance)
+                return selected_balance
         except Exception as e: logger.log_error(0, f"查询余额失败 {phone}", e)
         return None
 
@@ -895,10 +933,10 @@ class GlobalScheduler:
         if len(history) < 10:
             logger.log_game("历史数据不足,跳过预测")
             return
-        
+
         kill_target = self.model.predict_kill(history)
         logger.log_prediction(0, "预测杀组", f"期号:{qihao} 杀:{kill_target}")
-        
+
         # 投注延迟
         await asyncio.sleep(20)
         for phone, acc in self.account_manager.accounts.items():
@@ -922,7 +960,7 @@ class PC28Bot:
         self.global_scheduler = GlobalScheduler(self.account_manager, self.model, self.api, self.game_scheduler)
         self.application = Application.builder().token(Config.BOT_TOKEN).build()
         self._register_handlers()
-        logger.log_system("PC28 Bot（含推荐金额功能）初始化完成")
+        logger.log_system("PC28 Bot初始化完成")
 
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
@@ -958,9 +996,8 @@ class PC28Bot:
             [InlineKeyboardButton("📱 账户管理", callback_data="menu:accounts")],
             [InlineKeyboardButton("🎯 智能预测", callback_data="menu:prediction")],
             [InlineKeyboardButton("📊 系统状态", callback_data="menu:status")],
-            [InlineKeyboardButton("💡 推荐金额", callback_data="menu:recommend")],
         ]
-        await update.message.reply_text("🎰 *PC28 智能投注系统*\n\n✨ 欢迎使用!\n💡 新增功能：智能推荐金额", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update.message.reply_text("🎰 *PC28 智能投注系统*\n\n✨ 欢迎使用!", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
     async def add_account_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -998,128 +1035,119 @@ class PC28Bot:
                 await self._show_account_detail(query, query.from_user.id, phone)
                 return ConversationHandler.END
             else:
-                res = await client.send_code_request(phone)
-                self.account_manager.set_login_session(phone, {'phone_code_hash': res.phone_code_hash})
-                await query.edit_message_text(f"📨 验证码已发送到 `{phone}`\n\n请输入验证码:", parse_mode='Markdown')
+                await client.send_code_request(phone)
+                await query.edit_message_text(f"📱 已向 {phone} 发送验证码，请输入:\n\n点击 /cancel 取消")
                 return Config.LOGIN_CODE
         except Exception as e:
-            await query.edit_message_text(f"❌ 登录失败:{str(e)[:200]}")
+            logger.log_error(query.from_user.id, f"登录初始化失败 {phone}", e)
+            await query.edit_message_text(f"❌ 登录初始化失败: {e}")
             return ConversationHandler.END
 
     async def login_code(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user.id
+        user_id = update.effective_user.id
         phone = context.user_data.get('login_phone')
+        if not phone:
+            await update.message.reply_text("❌ 会话已过期，请重新登录")
+            return ConversationHandler.END
         code = update.message.text.strip()
         client = self.account_manager.clients.get(phone)
-        sess = self.account_manager.get_login_session(phone)
+        if not client:
+            await update.message.reply_text("❌ 客户端未找到")
+            return ConversationHandler.END
         try:
-            await client.sign_in(phone, code, phone_code_hash=sess['phone_code_hash'])
+            await client.sign_in(phone, code)
             me = await client.get_me()
             display = f"{me.first_name or ''} {me.last_name or ''}".strip()
-            await self.account_manager.update_account(phone, is_logged_in=True, needs_2fa=False, display_name=display, telegram_user_id=me.id)
-            self.account_manager.login_sessions.pop(phone, None)
-            await self._show_account_detail(update.message, user, phone)
+            await self.account_manager.update_account(phone, is_logged_in=True, display_name=display, telegram_user_id=me.id)
+            await update.message.reply_text(f"✅ 登录成功! 欢迎 {display}")
+            await self._show_account_detail(update.message, user_id, phone)
             return ConversationHandler.END
         except SessionPasswordNeededError:
-            await update.message.reply_text("🔒 此账户启用了两步验证,请输入密码:")
+            await update.message.reply_text("🔐 需要两步验证密码，请输入:\n\n点击 /cancel 取消")
             return Config.LOGIN_PASSWORD
         except Exception as e:
-            await update.message.reply_text(f"❌ 验证失败:{str(e)}")
-            return Config.LOGIN_CODE
+            logger.log_error(user_id, f"验证码登录失败 {phone}", e)
+            await update.message.reply_text(f"❌ 登录失败: {e}")
+            return ConversationHandler.END
 
     async def login_password(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        user = update.effective_user.id
+        user_id = update.effective_user.id
         phone = context.user_data.get('login_phone')
-        pwd = update.message.text.strip()
+        if not phone:
+            await update.message.reply_text("❌ 会话已过期")
+            return ConversationHandler.END
+        password = update.message.text.strip()
         client = self.account_manager.clients.get(phone)
+        if not client:
+            await update.message.reply_text("❌ 客户端未找到")
+            return ConversationHandler.END
         try:
-            await client.sign_in(password=pwd)
+            await client.sign_in(password=password)
             me = await client.get_me()
             display = f"{me.first_name or ''} {me.last_name or ''}".strip()
-            await self.account_manager.update_account(phone, is_logged_in=True, needs_2fa=False, display_name=display, telegram_user_id=me.id)
-            await self._show_account_detail(update.message, user, phone)
+            await self.account_manager.update_account(phone, is_logged_in=True, display_name=display, telegram_user_id=me.id)
+            await update.message.reply_text(f"✅ 登录成功! 欢迎 {display}")
+            await self._show_account_detail(update.message, user_id, phone)
             return ConversationHandler.END
         except Exception as e:
-            await update.message.reply_text(f"❌ 密码验证失败:{str(e)}")
-            return Config.LOGIN_PASSWORD
+            logger.log_error(user_id, f"密码登录失败 {phone}", e)
+            await update.message.reply_text(f"❌ 登录失败: {e}")
+            return ConversationHandler.END
 
     async def handle_callback(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
         await query.answer()
-        data = query.data
         user = query.from_user.id
+        data = query.data
 
-        if data == "menu:main": await self._show_main_menu(query)
-        elif data == "menu:prediction": await self._show_prediction(query)
-        elif data == "menu:status": await self._show_status(query)
-        elif data == "menu:accounts": await self._show_accounts_menu(query, user)
-        elif data == "menu:recommend": await self._show_recommend_accounts(query, user)
-        elif data == "add_account": await self.add_account_start(update, context)
-        elif data == "refresh_status": await self._show_status(query)
+        if data == "menu:main":
+            await self._show_main_menu(query)
+        elif data == "menu:accounts":
+            await self._show_accounts_menu(query, user)
+        elif data == "menu:prediction":
+            await self._show_prediction(query)
+        elif data == "menu:status":
+            await self._show_status(query)
         elif data.startswith("select_account:"):
-            phone = data.split(":")[1]
+            phone = data.split(':')[1]
             await self._show_account_detail(query, user, phone)
-        elif data.startswith("recommend_account:"):
-            phone = data.split(":")[1]
-            await self._show_recommend_menu(query, user, phone)
-        elif data.startswith("recommend_mode:"):
-            parts = data.split(":")
-            mode = parts[1]
-            phone = parts[2]
-            await self._calculate_and_show_recommendation(query, user, phone, mode)
-        elif data.startswith("set_recommend:"):
-            parts = data.split(":")
-            answer = parts[1]
-            phone = parts[2]
-            amount = float(parts[3])
-            if answer == 'yes':
-                ok, msg = await self.amount_manager.set_param(phone, 'base_amount', amount, user)
-                if ok:
-                    await query.edit_message_text(f"✅ 基础金额已设置为 {amount:.0f} KK")
-                else:
-                    await query.edit_message_text(f"❌ 设置失败: {msg}")
-            await self._show_account_detail(query, user, phone)
-        elif data.startswith("action:"):
-            parts = data.split(":")
-            action = parts[1]
-            phone = parts[2] if len(parts) > 2 else None
-            await self._process_action(query, user, action, phone)
-        elif data.startswith("set_strategy:"):
-            parts = data.split(":")
-            if len(parts) == 3: await self._process_set_strategy(query, user, parts[1], parts[2])
-        elif data.startswith("set_scheme:"):
-            parts = data.split(":")
-            if len(parts) == 3: await self._process_set_scheme(query, user, parts[1], parts[2])
-        elif data.startswith("set_group:"):
-            group_id = int(data.split(":")[1])
-            phone = self.account_manager.get_user_state(user).get('current_account')
-            if phone:
-                client = self.account_manager.clients.get(phone)
-                group_name = str(group_id)
-                if client:
-                    try:
-                        entity = await client.get_entity(group_id)
-                        group_name = getattr(entity, 'title', str(group_id))
-                    except: pass
-                await self.account_manager.update_account(phone, game_group_id=group_id, game_group_name=group_name)
-                await self._show_account_detail(query, user, phone)
         elif data.startswith("amount_menu:"):
-            phone = data.split(":")[1]
+            phone = data.split(':')[1]
             await self._show_amount_menu(query, user, phone, context)
         elif data.startswith("amount_set:"):
-            parts = data.split(":")
-            param_name = parts[1]
-            phone = parts[2]
+            parts = data.split(':')
+            param_name, phone = parts[1], parts[2]
             await self._amount_set_callback(query, user, phone, param_name, context)
+        elif data.startswith("action:"):
+            parts = data.split(':')
+            action, phone = parts[1], parts[2]
+            await self._process_action(query, user, action, phone)
+        elif data.startswith("set_strategy:"):
+            parts = data.split(':')
+            phone, strategy = parts[1], parts[2]
+            await self._process_set_strategy(query, user, phone, strategy)
+        elif data.startswith("set_group:"):
+            group_id = int(data.split(':')[1])
+            state = self.account_manager.get_user_state(user, 'account_selected')
+            if state and 'current_account' in state:
+                phone = state['current_account']
+                await self.account_manager.update_account(phone, game_group_id=group_id)
+                await self._show_account_detail(query, user, phone)
+        elif data.startswith("set_currency:"):
+            parts = data.split(":")
+            if len(parts) == 3:
+                phone, currency = parts[1], parts[2]
+                await self._set_currency(query, user, phone, currency)
+        elif data == "refresh_status":
+            await self._show_status(query)
 
     async def _show_main_menu(self, query):
         kb = [
             [InlineKeyboardButton("📱 账户管理", callback_data="menu:accounts")],
             [InlineKeyboardButton("🎯 智能预测", callback_data="menu:prediction")],
             [InlineKeyboardButton("📊 系统状态", callback_data="menu:status")],
-            [InlineKeyboardButton("💡 推荐金额", callback_data="menu:recommend")],
         ]
-        await query.edit_message_text("🎮 *PC28 智能投注系统*\n\n✨ 请选择操作:\n💡 推荐金额：根据余额智能计算建议每注金额", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await query.edit_message_text("🎰 *PC28 智能投注系统*\n\n✨ 请选择操作:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _show_accounts_menu(self, query, user):
         accounts = self.account_manager.get_user_accounts(user)
@@ -1128,7 +1156,7 @@ class PC28Bot:
         if accounts:
             for acc in accounts:
                 status = "✅" if acc.is_logged_in else "❌"
-                text += f"{status} {acc.get_display_name()}\n"
+                text += f"{status} {acc.get_display_name()} ({acc.currency})\n"
         kb.append([InlineKeyboardButton("➕ 添加账户", callback_data="add_account")])
         if accounts:
             for acc in accounts:
@@ -1136,117 +1164,25 @@ class PC28Bot:
         kb.append([InlineKeyboardButton("🔙 返回", callback_data="menu:main")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
-    async def _show_recommend_accounts(self, query, user):
-        accounts = self.account_manager.get_user_accounts(user)
-        if not accounts:
-            await query.edit_message_text("📭 您还没有添加账户，请先添加账户", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("➕ 添加账户", callback_data="add_account")]]))
-            return
-        
-        kb = []
-        text = "💡 *选择要计算推荐金额的账户*\n\n"
-        for acc in accounts:
-            if acc.is_logged_in:
-                text += f"✅ {acc.get_display_name()}\n"
-                kb.append([InlineKeyboardButton(f"{acc.get_display_name()}", callback_data=f"recommend_account:{acc.phone}")])
-            else:
-                text += f"❌ {acc.get_display_name()} (未登录)\n"
-        
-        kb.append([InlineKeyboardButton("🔙 返回主菜单", callback_data="menu:main")])
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-
-    async def _show_recommend_menu(self, query, user, phone):
-        acc = self.account_manager.get_account(phone)
-        if not acc:
-            await query.edit_message_text("❌ 账户不存在")
-            return
-        
-        kb = [
-            [InlineKeyboardButton("🛡️ 保守型 (1%)", callback_data=f"recommend_mode:保守:{phone}"),
-             InlineKeyboardButton("📊 稳健型 (0.8%)", callback_data=f"recommend_mode:稳健:{phone}")],
-            [InlineKeyboardButton("⚖️ 平衡型 (1.5%)", callback_data=f"recommend_mode:平衡:{phone}"),
-             InlineKeyboardButton("🚀 进取型 (3%)", callback_data=f"recommend_mode:进取:{phone}")],
-            [InlineKeyboardButton("⚡ 激进型 (5%)", callback_data=f"recommend_mode:激进:{phone}")],
-            [InlineKeyboardButton("🔙 返回账户列表", callback_data="menu:accounts")]
-        ]
-        
-        text = f"💡 *推荐金额计算 - {acc.get_display_name()}*\n\n"
-        text += "请选择风险偏好，系统将根据当前余额计算建议每注金额：\n\n"
-        text += "• 保守型：余额 × 1% (风险最低)\n"
-        text += "• 稳健型：余额 × 0.8% (低风险)\n"
-        text += "• 平衡型：余额 × 1.5% (中低风险)\n"
-        text += "• 进取型：余额 × 3% (中高风险)\n"
-        text += "• 激进型：余额 × 5% (高风险)\n"
-        
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-
-    async def _calculate_and_show_recommendation(self, query, user, phone, mode):
-        acc = self.account_manager.get_account(phone)
-        if not acc:
-            await query.edit_message_text("❌ 账户不存在")
-            return
-        
-        # 获取当前余额
-        balance = self.account_manager.get_cached_balance(phone)
-        if balance is None:
-            balance = await self.game_scheduler.get_balance(phone)
-        if balance is None:
-            await query.edit_message_text("❌ 无法获取余额，请稍后重试")
-            return
-
-        # 风险比例映射
-        risk_ratios = {
-            '保守': 0.01,   # 1%
-            '稳健': 0.008,  # 0.8%
-            '平衡': 0.015,  # 1.5%
-            '进取': 0.03,   # 3%
-            '激进': 0.05    # 5%
-        }
-        
-        ratio = risk_ratios.get(mode, 0.01)
-        recommend = balance * ratio
-        
-        # 限制在合理范围内
-        recommend = max(Config.MIN_BET_AMOUNT, min(recommend, Config.MAX_BET_AMOUNT))
-        # 取整到最近的1000
-        recommend = int(recommend / 1000) * 1000
-        if recommend < Config.MIN_BET_AMOUNT:
-            recommend = Config.MIN_BET_AMOUNT
-        
-        text = (
-            f"💡 *推荐金额计算结果*\n\n"
-            f"📱 账户: {acc.get_display_name()}\n"
-            f"💰 当前余额: {balance:.0f} KK\n"
-            f"📊 选择模式: {mode}\n"
-            f"🎯 推荐每注金额: {recommend:.0f} KK\n\n"
-            f"是否将此金额设置为当前账户的基础金额？\n\n"
-            f"💡 提示：推荐金额仅供参考，请根据实际情况调整。"
-        )
-        kb = [
-            [InlineKeyboardButton("✅ 是，设置为基础金额", callback_data=f"set_recommend:yes:{phone}:{recommend}"),
-             InlineKeyboardButton("❌ 否，返回", callback_data=f"select_account:{phone}")],
-            [InlineKeyboardButton("🔄 重新选择模式", callback_data=f"recommend_account:{phone}")]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
-
     async def _show_amount_menu(self, query, user, phone, context):
         acc = self.account_manager.get_account(phone)
         if not acc:
             await query.edit_message_text("❌ 账户不存在")
             return
-        
+
         text = f"""
 💰 *金额设置*
 
 📱 账户: {acc.get_display_name()}
+💱 币种: {acc.currency}
 
 当前设置:
-• 基础金额: {acc.bet_params.base_amount} KK
-• 最大金额: {acc.bet_params.max_amount} KK
-• 止损金额: {acc.bet_params.stop_loss} KK
-• 止盈金额: {acc.bet_params.stop_win} KK
-• 停止余额: {acc.bet_params.stop_balance} KK
-• 恢复余额: {acc.bet_params.resume_balance} KK
-• 动态比例: {acc.bet_params.dynamic_base_ratio*100:.0f}% ({'开启' if acc.bet_params.dynamic_base_ratio>0 else '关闭'})
+• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}
+• 最大金额: {format_amount(acc.bet_params.max_amount, acc.currency)}
+• 止损金额: {format_amount(acc.bet_params.stop_loss, acc.currency)}
+• 止盈金额: {format_amount(acc.bet_params.stop_win, acc.currency)}
+• 停止余额: {format_amount(acc.bet_params.stop_balance, acc.currency)}
+• 恢复余额: {format_amount(acc.bet_params.resume_balance, acc.currency)}
 
 请选择需要修改的金额类型：
         """
@@ -1257,7 +1193,6 @@ class PC28Bot:
              InlineKeyboardButton("⛔ 止损金额", callback_data=f"amount_set:stop_loss:{phone}")],
             [InlineKeyboardButton("✅ 止盈金额", callback_data=f"amount_set:stop_win:{phone}"),
              InlineKeyboardButton("🔄 恢复余额", callback_data=f"amount_set:resume_balance:{phone}")],
-            [InlineKeyboardButton("📈 动态投注比例", callback_data=f"amount_set:dynamic_base_ratio:{phone}")],
             [InlineKeyboardButton("🔙 返回账户详情", callback_data=f"select_account:{phone}")],
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -1270,17 +1205,15 @@ class PC28Bot:
             'stop_loss': '止损金额',
             'stop_win': '止盈金额',
             'resume_balance': '恢复余额',
-            'dynamic_base_ratio': '动态投注比例'
         }
         display_name = param_names.get(param_name, param_name)
         self.account_manager.set_user_state(user, 'account_selected', {'current_account': phone})
         await self.account_manager.update_account(phone, input_mode=param_name, input_buffer='')
-        
-        if param_name == 'dynamic_base_ratio':
-            text = f"🔢 请输入动态投注比例（如0.03表示3%）：\n\n范围0~1，输入0关闭动态。"
-        else:
-            text = f"🔢 请输入新的 {display_name}（单位：KK）："
-        
+
+        acc = self.account_manager.get_account(phone)
+        symbol = acc.get_currency_symbol() if acc else ""
+        text = f"🔢 请输入新的 {display_name}（单位：{symbol}）："
+
         kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"amount_menu:{phone}")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
@@ -1296,24 +1229,20 @@ class PC28Bot:
         if acc.auto_betting: status += " | 🤖 自动投注"
         bet_button = "🛑 停止自动投注" if acc.auto_betting else "🤖 开启自动投注"
         net_profit = acc.total_profit - acc.total_loss
-        
-        # 动态比例状态
-        dynamic_status = f"动态:{acc.bet_params.dynamic_base_ratio*100:.0f}%" if acc.bet_params.dynamic_base_ratio > 0 else "动态:关闭"
-        
+
         kb = [
             [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
              InlineKeyboardButton("🚪 登出", callback_data=f"action:logout:{phone}")],
             [InlineKeyboardButton("💬 游戏群", callback_data=f"action:listgroups:{phone}")],
-            [InlineKeyboardButton("🎯 投注方案", callback_data=f"action:setscheme:{phone}"),
-             InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}")],
-            [InlineKeyboardButton("💰 金额设置", callback_data=f"amount_menu:{phone}"),
-             InlineKeyboardButton("💡 推荐金额", callback_data=f"recommend_account:{phone}")],
+            [InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}")],
+            [InlineKeyboardButton("💱 投注币种", callback_data=f"action:setcurrency:{phone}"),
+             InlineKeyboardButton("💰 金额设置", callback_data=f"amount_menu:{phone}")],
             [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}")],
             [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"),
              InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
             [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
         ]
-        text = f"📱 *账户: {display}*\n\n状态: {status}\n净盈利: {net_profit:.0f}KK\n基础金额: {acc.bet_params.base_amount} KK\n{dynamic_status}\n\n选择操作:"
+        text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n净盈利: {format_amount(net_profit, acc.currency)}\n基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
         try: await query_or_message.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         except: await query_or_message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
@@ -1359,14 +1288,17 @@ class PC28Bot:
             else: await self.game_scheduler.start_auto_betting(phone, user)
             await self._show_account_detail(query, user, phone)
         elif action == "balance":
+            acc = self.account_manager.get_account(phone)
             bal = await self.game_scheduler.get_balance(phone)
-            text = f"💰 余额: {bal:.2f} KK" if bal is not None else "❌ 查询失败"
+            if bal is not None:
+                text = f"💰 余额: {format_amount(bal, acc.currency if acc else 'KKCOIN')}"
+            else:
+                text = "❌ 查询失败"
             kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "status":
             acc = self.account_manager.get_account(phone)
-            dynamic_status = f"动态比例: {acc.bet_params.dynamic_base_ratio*100:.0f}%" if acc.bet_params.dynamic_base_ratio > 0 else "动态比例: 关闭"
-            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {acc.balance:.2f}KK\n• 基础金额: {acc.bet_params.base_amount} KK\n• {dynamic_status}\n• 总投注: {acc.total_bets}次\n• 净盈利: {acc.total_profit - acc.total_loss:.2f}KK"
+            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 投注币种: {acc.currency}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {format_amount(acc.balance, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n• 总投注: {acc.total_bets}次\n• 净盈利: {format_amount(acc.total_profit - acc.total_loss, acc.currency)}"
             kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "listgroups":
@@ -1387,20 +1319,51 @@ class PC28Bot:
             kb = [[InlineKeyboardButton(name, callback_data=f"set_strategy:{phone}:{name}")] for name in self.strategy_manager.strategies.keys()]
             kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
             await query.edit_message_text("📊 选择投注策略:", reply_markup=InlineKeyboardMarkup(kb))
-        elif action == "setscheme":
-            kb = [[InlineKeyboardButton(name, callback_data=f"set_scheme:{phone}:{name}")] for name in self.strategy_manager.schemes.keys()]
-            kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
-            await query.edit_message_text("🎯 选择投注方案:", reply_markup=InlineKeyboardMarkup(kb))
+        elif action == "setcurrency":
+            await self._show_currency_menu(query, user, phone)
 
     async def _process_set_strategy(self, query, user, phone, strategy):
         ok, msg = await self.strategy_manager.set_strategy(phone, strategy, user)
         if ok: await self._show_account_detail(query, user, phone)
         else: await query.edit_message_text(f"❌ {msg}")
 
-    async def _process_set_scheme(self, query, user, phone, scheme):
-        ok, msg = await self.strategy_manager.set_scheme(phone, scheme, user)
-        if ok: await self._show_account_detail(query, user, phone)
-        else: await query.edit_message_text(f"❌ {msg}")
+    async def _show_currency_menu(self, query, user, phone):
+        acc = self.account_manager.get_account(phone)
+        if not acc:
+            await query.edit_message_text("❌ 账户不存在")
+            return
+        current = acc.currency
+        kb = []
+        for currency in Config.AVAILABLE_CURRENCIES:
+            mark = "✅ " if currency == current else ""
+            kb.append([InlineKeyboardButton(f"{mark}{currency}", callback_data=f"set_currency:{phone}:{currency}")])
+        kb.append([InlineKeyboardButton("🔙 返回账户详情", callback_data=f"select_account:{phone}")])
+        text = f"""
+💱 *投注币种设置*
+
+当前币种: {current}
+
+选择投注时使用的币种：
+
+• KKCOIN - 平台积分，默认币种
+• USDT - 稳定币
+• CNY - 人民币
+
+余额显示和投注金额都会按您选择的币种计算。
+
+⚠️ 注意：切换币种后，请重新设置投注金额。
+        """
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+
+    async def _set_currency(self, query, user, phone, currency):
+        if currency not in Config.AVAILABLE_CURRENCIES:
+            await query.edit_message_text("❌ 无效币种")
+            return
+        await self.account_manager.update_account(phone, currency=currency)
+        # 清除余额缓存（不同币种余额不同）
+        self.account_manager.balance_cache.pop(phone, None)
+        await query.edit_message_text(f"✅ 投注币种已切换为 {currency}")
+        await self._show_account_detail(query, user, phone)
 
 # ==================== 启动 ====================
 async def post_init(application):
@@ -1434,7 +1397,7 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     print("=" * 40)
     print("PC28 智能预测投注系统")
-    print("含推荐金额功能 | 支持动态投注比例")
+    print("多币种支持: KKCOIN / USDT / CNY")
     print("=" * 40)
     try: Config.validate()
     except ValueError as e: print(f"❌ 配置错误: {e}"); return
