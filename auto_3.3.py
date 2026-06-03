@@ -72,6 +72,10 @@ class Config:
         "USDT": "USDT",
         "CNY": "¥"
     }
+    # 新增：预测置信度阈值
+    MIN_PREDICTION_CONFIDENCE = 0.35
+    # 新增：集成模型权重配置
+    ENSEMBLE_WEIGHTS = {"trend": 0.35, "probability": 0.35, "original": 0.15, "v3": 0.15}
 
     @classmethod
     def init_dirs(cls):
@@ -168,6 +172,107 @@ logger = BotLogger()
 
 COMBOS = ["小单", "小双", "大单", "大双"]
 
+# ==================== 新增：优化的预测算法 ====================
+
+def trend_based_prediction(history: List[Dict]) -> List[str]:
+    """基于趋势的预测算法"""
+    if len(history) < 15:
+        return ["小单"]
+    
+    combos = [h.get("combo", h.get("combination", "小单")) for h in history[:20]]
+    
+    # 检测连开模式
+    last_3 = combos[:3]
+    if len(set(last_3)) == 1:  # 三连相同
+        opposite = {"大单":"小双", "小双":"大单", "大双":"小单", "小单":"大双"}
+        return [opposite.get(last_3[0], "小单")]
+    
+    # 检测大小单双的冷热
+    size_counter = Counter([c[0] for c in combos])  # 大/小
+    parity_counter = Counter([c[1] for c in combos])  # 单/双
+    
+    # 根据近期趋势决定追冷还是追热
+    recent_size = [c[0] for c in combos[:10]]
+    recent_parity = [c[1] for c in combos[:10]]
+    
+    if recent_size.count(recent_size[0]) >= 7:  # 大小偏态严重
+        predicted_size = "小" if recent_size[0] == "大" else "大"
+    else:
+        predicted_size = min(size_counter, key=size_counter.get)  # 追冷
+        
+    if recent_parity.count(recent_parity[0]) >= 7:
+        predicted_parity = "双" if recent_parity[0] == "单" else "单"
+    else:
+        predicted_parity = min(parity_counter, key=parity_counter.get)
+    
+    return [predicted_size + predicted_parity]
+
+def probability_distribution_prediction(history: List[Dict]) -> List[str]:
+    """基于概率转移矩阵的预测"""
+    if len(history) < 20:
+        return ["小单"]
+    
+    combos = [h.get("combo", h.get("combination", "小单")) for h in history[:30]]
+    
+    # 计算转移概率矩阵
+    transitions = {}
+    for i in range(len(combos) - 1):
+        curr, next_c = combos[i], combos[i+1]
+        if curr not in transitions:
+            transitions[curr] = {}
+        transitions[curr][next_c] = transitions[curr].get(next_c, 0) + 1
+    
+    # 归一化
+    for curr in transitions:
+        total = sum(transitions[curr].values())
+        if total > 0:
+            for next_c in transitions[curr]:
+                transitions[curr][next_c] /= total
+    
+    # 基于当前状态预测下一期
+    current = combos[0]
+    if current in transitions and transitions[current]:
+        # 返回概率最低的（杀组思维：押其他三个）
+        probs = transitions[current]
+        predicted = min(probs, key=probs.get)
+        return [predicted]
+    
+    return ["小单"]
+
+def v3_enhanced_prediction(history: List[Dict]) -> List[str]:
+    """增强版V3预测"""
+    if len(history) < 10:
+        return ["小单"]
+    
+    forms = ["大单", "小单", "大双", "小双"]
+    h = [x.get("combo", x.get("combination", "小单")) for x in history[:30]]
+    
+    if not h:
+        return ["小单"]
+    
+    # 计算加权计数（近期权重更高）
+    weighted_counts = {f: 0 for f in forms}
+    for i, combo in enumerate(h):
+        weight = 1.0 / (i + 1)  # 越近期权重越高
+        weighted_counts[combo] = weighted_counts.get(combo, 0) + weight
+    
+    # 检测模式
+    unique_recent = len(set(h[:5]))
+    
+    if unique_recent == 1:  # 5连相同
+        opposite = {"大单":"小双", "小双":"大单", "大双":"小单", "小单":"大双"}
+        return [opposite.get(h[0], "小单")]
+    elif unique_recent <= 2:  # 偏态
+        # 预测冷门
+        return [min(weighted_counts, key=weighted_counts.get)]
+    else:
+        # 正常情况，预测最冷
+        return [min(weighted_counts, key=weighted_counts.get)]
+
+def original_armor_prediction(history: List[Dict]) -> List[str]:
+    """原始的Armor V23预测"""
+    return algo_v23_armor(history)[0] if len(history) >= 15 else ["小单"]
+
 def algo_v23_armor(history):
     try:
         if len(history)<15: return ["小单"],"数据不足"
@@ -186,6 +291,134 @@ def algo_v23_armor(history):
             s=sorted(om,key=om.get,reverse=True)[0]
         return [s], "预测"
     except: return ["小单"],"数据异常"
+
+# ==================== 新增：集成预测器 ====================
+
+class EnsemblePredictor:
+    """多模型集成预测器，支持在线学习权重调整"""
+    
+    def __init__(self):
+        self.models = {
+            "trend": trend_based_prediction,
+            "probability": probability_distribution_prediction,
+            "v3": v3_enhanced_prediction,
+            "original": original_armor_prediction,
+        }
+        self.weights = Config.ENSEMBLE_WEIGHTS.copy()
+        self.performance_history = {name: deque(maxlen=50) for name in self.models}
+        self.prediction_history = deque(maxlen=Config.PREDICTION_HISTORY_SIZE)
+        self.confidence_threshold = Config.MIN_PREDICTION_CONFIDENCE
+        
+    def predict(self, history: List[Dict]) -> Tuple[str, float]:
+        """
+        集成预测
+        返回: (杀组目标, 置信度)
+        """
+        if len(history) < 15:
+            return "小单", 0.5
+        
+        predictions = {}
+        for name, model in self.models.items():
+            try:
+                pred = model(history)[0]
+                predictions[name] = pred
+            except Exception as e:
+                logger.log_error(0, f"模型{name}预测失败", e)
+                predictions[name] = "小单"
+        
+        # 加权投票
+        vote_count = {}
+        for name, pred in predictions.items():
+            weight = self.weights.get(name, 1.0)
+            # 根据近期表现动态调整权重
+            perf = self._get_recent_performance(name)
+            adjusted_weight = weight * (1 + perf)
+            vote_count[pred] = vote_count.get(pred, 0) + adjusted_weight
+        
+        # 返回得票最少的（杀组思维）
+        kill_target = min(vote_count, key=vote_count.get)
+        
+        # 计算置信度
+        total_weight = sum(vote_count.values())
+        if total_weight > 0:
+            # 杀组目标的得票率越低，置信度越高（因为杀的是冷门）
+            confidence = 1 - (vote_count.get(kill_target, 0) / total_weight)
+        else:
+            confidence = 0.5
+        
+        # 记录预测
+        self.prediction_history.append({
+            'time': datetime.now(),
+            'kill': kill_target,
+            'confidence': confidence,
+            'predictions': predictions.copy()
+        })
+        
+        return kill_target, confidence
+    
+    def _get_recent_performance(self, model_name: str) -> float:
+        """获取模型近期表现评分（-0.5 到 0.5）"""
+        history = self.performance_history.get(model_name, [])
+        if len(history) < 5:
+            return 0
+        
+        # 近期准确率加权平均
+        recent = list(history)[-20:]
+        weights = [1.0 / (i + 1) for i in range(len(recent))]
+        total_weight = sum(weights)
+        if total_weight == 0:
+            return 0
+        
+        weighted_acc = sum(w * acc for w, acc in zip(weights, recent)) / total_weight
+        # 转换为 -0.5 到 0.5 的范围
+        return (weighted_acc - 0.5) * 1.0
+    
+    def update_performance(self, actual_combo: str):
+        """
+        更新模型表现（在线学习）
+        在每期开奖后调用
+        """
+        if not self.prediction_history:
+            return
+        
+        last_pred = self.prediction_history[-1]
+        predicted_kill = last_pred['kill']
+        predictions = last_pred.get('predictions', {})
+        
+        # 判断胜负：杀组正确意味着实际开出的不是杀组目标
+        is_win = (actual_combo != predicted_kill)
+        
+        # 更新每个模型的性能
+        for name, pred in predictions.items():
+            model_win = (actual_combo != pred)
+            self.performance_history[name].append(1.0 if model_win else 0.0)
+        
+        # 动态调整权重
+        for name in self.models:
+            perf = self._get_recent_performance(name)
+            # 表现好增加权重，表现差减少权重
+            adjustment = perf * 0.05
+            self.weights[name] = max(0.05, min(0.5, self.weights.get(name, 0.1) + adjustment))
+        
+        # 归一化权重
+        total = sum(self.weights.values())
+        if total > 0:
+            for name in self.weights:
+                self.weights[name] /= total
+        
+        # 记录胜负
+        logger.log_prediction(0, "预测结果反馈", 
+                             f"杀:{predicted_kill} 开:{actual_combo} {'✓赢' if is_win else '✗输'} 置信度:{last_pred['confidence']:.2f}")
+    
+    def get_stats(self) -> Dict:
+        """获取预测器统计信息"""
+        recent_perf = list(self.performance_history.get("trend", []))[-20:]
+        win_rate = sum(recent_perf) / len(recent_perf) if recent_perf else 0
+        return {
+            'weights': self.weights.copy(),
+            'recent_win_rate': f"{win_rate:.1%}",
+            'prediction_count': len(self.prediction_history)
+        }
 
 # ==================== 701个杀组模型 ====================
 ALL_MODELS = {}
@@ -275,8 +508,33 @@ ALL_MODELS[701] = {"func": lambda h: algo_v23_armor(h)[0], "info": {"id": 701, "
 class ModelManager:
     def __init__(self):
         self.all_models = ALL_MODELS
+        # 使用新的集成预测器
+        self.ensemble = EnsemblePredictor()
 
-    def predict_kill(self, history):
+    def predict_kill(self, history: List[Dict]) -> Tuple[str, float]:
+        """
+        预测杀组
+        返回: (杀组目标, 置信度)
+        """
+        if len(history) < 10:
+            return "小单", 0.5
+        return self.ensemble.predict(history)
+    
+    def predict_kill_simple(self, history: List[Dict]) -> str:
+        """简化版预测，只返回杀组目标"""
+        kill, _ = self.predict_kill(history)
+        return kill
+    
+    def update_prediction_result(self, actual_combo: str):
+        """更新预测结果用于在线学习"""
+        self.ensemble.update_performance(actual_combo)
+    
+    def get_ensemble_stats(self) -> Dict:
+        """获取集成预测器统计信息"""
+        return self.ensemble.get_stats()
+    
+    # 保留原有的滑动窗口验证方法作为备用
+    def predict_kill_legacy(self, history):
         if len(history) < 10: return "小单"
         best_id, best_rate = None, 0
         total = min(50, len(history) - 1)
@@ -492,6 +750,7 @@ class Account:
     prediction_content: str = "kill"
     broadcast_stop_requested: bool = False
     currency: str = Config.DEFAULT_CURRENCY
+    last_prediction_confidence: float = 0.0  # 新增：记录上次预测置信度
 
     def get_display_name(self) -> str:
         return self.display_name if self.display_name else self.phone
@@ -534,6 +793,8 @@ class AccountManager:
                     acc_data['bet_params'] = bet_params
                     if 'currency' not in acc_data:
                         acc_data['currency'] = Config.DEFAULT_CURRENCY
+                    if 'last_prediction_confidence' not in acc_data:
+                        acc_data['last_prediction_confidence'] = 0.0
                     self.accounts[phone] = Account(**acc_data)
             if self.user_states_file.exists():
                 with open(self.user_states_file, 'r', encoding='utf-8') as f:
@@ -740,7 +1001,7 @@ class GameScheduler:
         logger.log_betting(user_id, "自动投注关闭", f"账户:{phone}")
         return True, "自动投注已关闭"
 
-    async def execute_bet(self, phone, kill_target, latest):
+    async def execute_bet(self, phone, kill_target, latest, confidence=0.5):
         acc = self.account_manager.get_account(phone)
         if not acc or not acc.auto_betting: return
         if not await self.account_manager.ensure_client_connected(phone): return
@@ -752,10 +1013,16 @@ class GameScheduler:
         if current_balance is None:
             current_balance = acc.balance
 
+        # 根据置信度调整投注金额
+        confidence_multiplier = 0.5 + confidence  # confidence 0-1 -> 0.5-1.5
+        confidence_multiplier = max(0.5, min(1.5, confidence_multiplier))
+        
         # 使用基础金额
         base_amount = acc.bet_params.base_amount
+        # 根据置信度调整
+        adjusted_base = base_amount * confidence_multiplier
 
-        # 计算倍投乘数:根据连输次数进行乘机
+        # 计算倍投乘数
         current_multiplier = 1.0
         if acc.consecutive_losses > 0:
             current_multiplier = acc.bet_params.multiplier ** acc.consecutive_losses
@@ -769,7 +1036,7 @@ class GameScheduler:
         total_bet_amount = 0
 
         for t in bet_types:
-            calculated_amount = base_amount * current_multiplier
+            calculated_amount = adjusted_base * current_multiplier
             calculated_amount = min(calculated_amount, max_limit)
             calculated_amount = max(calculated_amount, min_limit)
             # 币种精度处理
@@ -798,11 +1065,12 @@ class GameScheduler:
                 last_bet_types=bet_types,
                 total_bets=acc.total_bets + 1,
                 last_bet_total=total_bet_amount,
-                last_prediction={'kill': kill_target},
+                last_prediction={'kill': kill_target, 'confidence': confidence},
                 last_bet_period=current_qihao,
-                balance=current_balance
+                balance=current_balance,
+                last_prediction_confidence=confidence
             )
-            logger.log_betting(0, "投注成功", f"账户:{phone} 币种:{acc.currency} 每注:{format_amount(base_amount * current_multiplier, acc.currency)} 总金额:{format_amount(total_bet_amount, acc.currency)}\n{message}")
+            logger.log_betting(0, "投注成功", f"账户:{phone} 币种:{acc.currency} 每注:{format_amount(adjusted_base * current_multiplier, acc.currency)} 总金额:{format_amount(total_bet_amount, acc.currency)} 置信度:{confidence:.2f}\n{message}")
         except FloodWaitError as e:
             await asyncio.sleep(e.seconds)
         except Exception as e:
@@ -911,42 +1179,57 @@ class GlobalScheduler:
         for phone in expired_phones: del self.account_manager.balance_cache[phone]
 
     async def _on_new_period(self, qihao, latest):
-        # 在新期号出现时,优先根据上一期的投注和真实开奖结果,更新连输/回归状态机
+        # 优先根据上一期的投注和真实开奖结果,更新连输/回归状态机
         actual_combo = latest.get('combo')
         for phone, acc in self.account_manager.accounts.items():
             if acc.auto_betting and acc.last_prediction:
                 last_kill = acc.last_prediction.get('kill')
                 if last_kill:
-                    # 如果这期开奖的结果恰好是你上一期杀掉的组合(即下注的组合里没有它),说明杀组失败(输了)
                     if actual_combo == last_kill:
+                        # 杀组失败（开出了杀组目标），算输
                         new_losses = acc.consecutive_losses + 1
-                        await self.account_manager.update_account(phone, consecutive_losses=new_losses)
-                        logger.log_game(f"[{phone}] 上期杀【{last_kill}】失败(开出{actual_combo}),连输: {new_losses},下期倍投触发")
+                        new_total_losses = acc.total_loss + acc.last_bet_total
+                        await self.account_manager.update_account(phone, consecutive_losses=new_losses, total_loss=new_total_losses)
+                        logger.log_game(f"[{phone}] 上期杀【{last_kill}】失败(开出{actual_combo}),连输: {new_losses}, 本期亏损: {acc.last_bet_total}")
                     else:
-                        # 否则杀组成功(赢了),连输清零,下期金额回归正常
-                        if acc.consecutive_losses > 0:
-                            await self.account_manager.update_account(phone, consecutive_losses=0)
-                            logger.log_game(f"[{phone}] 上期杀【{last_kill}】成功(开出{actual_combo}),连输清零回归正常")
+                        # 杀组成功（开出的不是杀组目标），算赢
+                        # PC28杀组赢：投了3注（除杀组外的3个组合），每注赔率约3倍，净盈利 = 赢注金额*3 - 总投注金额
+                        bet_per_type = acc.last_bet_total / 3 if acc.last_bet_total > 0 else 0
+                        win_amount = bet_per_type * 3  # 赢的那注赔率3倍
+                        net_profit = win_amount - acc.last_bet_total  # 净盈利 = 赢回 - 总投注
+                        new_total_profit = acc.total_profit + net_profit
+                        new_total_wins = acc.total_wins + 1
+                        await self.account_manager.update_account(phone, consecutive_losses=0, total_profit=new_total_profit, total_wins=new_total_wins)
+                        logger.log_game(f"[{phone}] 上期杀【{last_kill}】成功(开出{actual_combo}),连输清零, 本期净赚: {net_profit}")
+        
+        # 更新模型表现（在线学习）
+        if actual_combo:
+            self.model.update_prediction_result(actual_combo)
 
-        # 原有逻辑:获取最新历史数据进行新一轮杀组预测
+        # 获取最新历史数据进行新一轮预测
         history = await self.api.get_history(50)
         if len(history) < 10:
             logger.log_game("历史数据不足,跳过预测")
             return
 
-        kill_target = self.model.predict_kill(history)
-        logger.log_prediction(0, "预测杀组", f"期号:{qihao} 杀:{kill_target}")
+        # 使用集成预测器获取杀组和置信度
+        kill_target, confidence = self.model.predict_kill(history)
+        logger.log_prediction(0, "集成预测杀组", f"期号:{qihao} 杀:{kill_target} 置信度:{confidence:.2f}")
+        
+        # 输出各模型权重信息（调试用）
+        ensemble_stats = self.model.get_ensemble_stats()
+        logger.log_system(f"集成模型权重: {ensemble_stats['weights']}")
 
         # 投注延迟
         await asyncio.sleep(20)
         for phone, acc in self.account_manager.accounts.items():
             if acc.auto_betting and acc.is_logged_in and acc.game_group_id:
-                self._create_task(self._execute_bet_with_semaphore(phone, kill_target, latest))
+                self._create_task(self._execute_bet_with_semaphore(phone, kill_target, latest, confidence))
         self.last_qihao = qihao
 
-    async def _execute_bet_with_semaphore(self, phone, kill_target, latest):
+    async def _execute_bet_with_semaphore(self, phone, kill_target, latest, confidence):
         async with self.bet_semaphore:
-            await self.game_scheduler.execute_bet(phone, kill_target, latest)
+            await self.game_scheduler.execute_bet(phone, kill_target, latest, confidence)
 
 # ==================== 主Bot类 ====================
 class PC28Bot:
@@ -960,7 +1243,7 @@ class PC28Bot:
         self.global_scheduler = GlobalScheduler(self.account_manager, self.model, self.api, self.game_scheduler)
         self.application = Application.builder().token(Config.BOT_TOKEN).build()
         self._register_handlers()
-        logger.log_system("PC28 Bot初始化完成")
+        logger.log_system("PC28 Bot初始化完成（已集成优化预测器）")
 
     def _register_handlers(self):
         self.application.add_handler(CommandHandler("start", self.cmd_start))
@@ -983,6 +1266,8 @@ class PC28Bot:
         self.application.add_handler(add_account_conv)
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_error_handler(self.error_handler)
+        # 新增：查看预测统计的命令
+        self.application.add_handler(CommandHandler("predict_stats", self.cmd_predict_stats))
 
     async def error_handler(self, update, context):
         logger.log_error(0, "Bot错误", str(context.error))
@@ -997,7 +1282,19 @@ class PC28Bot:
             [InlineKeyboardButton("🎯 智能预测", callback_data="menu:prediction")],
             [InlineKeyboardButton("📊 系统状态", callback_data="menu:status")],
         ]
-        await update.message.reply_text("🎰 *PC28 智能投注系统*\n\n✨ 欢迎使用!", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        await update.message.reply_text("🎰 *PC28 智能投注系统 v3.0*\n\n✨ 欢迎使用!\n🔄 已集成多模型集成预测", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+
+    async def cmd_predict_stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """查看预测统计信息"""
+        stats = self.model.get_ensemble_stats()
+        text = f"📊 *集成预测器统计*\n\n"
+        text += f"📈 近期胜率: {stats.get('recent_win_rate', 'N/A')}\n"
+        text += f"🎯 预测次数: {stats.get('prediction_count', 0)}\n\n"
+        text += f"⚖️ *模型权重:*\n"
+        for name, weight in stats.get('weights', {}).items():
+            text += f"  • {name}: {weight:.1%}\n"
+        text += f"\n💡 权重会根据实际表现自动调整"
+        await update.message.reply_text(text, parse_mode='Markdown')
 
     async def add_account_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         query = update.callback_query
@@ -1140,7 +1437,7 @@ class PC28Bot:
             [InlineKeyboardButton("🎯 智能预测", callback_data="menu:prediction")],
             [InlineKeyboardButton("📊 系统状态", callback_data="menu:status")],
         ]
-        await query.edit_message_text("🎰 *PC28 智能投注系统*\n\n✨ 请选择操作:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
+        await query.edit_message_text("🎰 *PC28 智能投注系统 v3.0*\n\n✨ 请选择操作:", reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _show_accounts_menu(self, query, user):
         accounts = self.account_manager.get_user_accounts(user)
@@ -1169,6 +1466,8 @@ class PC28Bot:
         if acc.auto_betting: status += " | 🤖 自动投注"
         bet_button = "🛑 停止自动投注" if acc.auto_betting else "🤖 开启自动投注"
         net_profit = acc.total_profit - acc.total_loss
+        win_rate = f"{acc.total_wins / acc.total_bets:.1%}" if acc.total_bets > 0 else "N/A"
+        loss_count = acc.total_bets - acc.total_wins
 
         kb = [
             [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
@@ -1181,27 +1480,45 @@ class PC28Bot:
              InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
             [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
         ]
-        text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n净盈利: {format_amount(net_profit, acc.currency)}\n基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
+        text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n\n📊 *投注统计*\n• 投注期数: {acc.total_bets}期\n• 赢了: {acc.total_wins}期\n• 输了: {loss_count}期\n• 胜率: {win_rate}\n• 净盈利: {format_amount(net_profit, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
         try: await query_or_message.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         except: await query_or_message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _show_prediction(self, query):
         history = await self.api.get_history(50)
-        if len(history) < 10: await query.edit_message_text("❌ 历史数据不足"); return
-        kill_target = self.model.predict_kill(history)
+        if len(history) < 10:
+            await query.edit_message_text("❌ 历史数据不足")
+            return
+        kill_target, confidence = self.model.predict_kill(history)
         latest = history[0] if history else {'qihao': 'N/A', 'combo': 'N/A'}
-        text = f"🎯 *当前预测*\n\n📊 最新期号: {latest.get('qihao')}\n📌 最新结果: {latest.get('combo')}\n\n🚫 杀组推荐: {kill_target}\n💡 投注: {' '.join([c for c in COMBOS if c != kill_target])}"
+        
+        # 置信度可视化
+        confidence_bar = "█" * int(confidence * 10) + "░" * (10 - int(confidence * 10))
+        
+        text = f"🎯 *当前预测（集成模型）*\n\n"
+        text += f"📊 最新期号: {latest.get('qihao')}\n"
+        text += f"📌 最新结果: {latest.get('combo')}\n\n"
+        text += f"🚫 *杀组推荐:* {kill_target}\n"
+        text += f"📈 *置信度:* {confidence_bar} {confidence:.1%}\n\n"
+        text += f"💡 投注建议: {' '.join([c for c in COMBOS if c != kill_target])}\n\n"
+        text += f"⚙️ 集成模型会随实际结果自动优化"
+        
         kb = [[InlineKeyboardButton("🔄 刷新预测", callback_data="menu:prediction")],
+              [InlineKeyboardButton("📊 查看模型统计", callback_data="menu:model_stats")],
               [InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
     async def _show_status(self, query):
         api_stats = self.api.get_statistics()
         sched_stats = self.game_scheduler.get_stats()
+        ensemble_stats = self.model.get_ensemble_stats()
         total_accounts = len(self.account_manager.accounts)
         logged = sum(1 for a in self.account_manager.accounts.values() if a.is_logged_in)
         auto = sched_stats['auto_betting_accounts']
-        text = f"📊 *系统状态*\n\n• 缓存数据: {api_stats['缓存数据量']}期\n• 最新期号: {api_stats['最新期号']}\n• 总账户: {total_accounts}\n• 已登录: {logged}\n• 自动投注: {auto}\n• 成功投注: {sched_stats['game_stats']['successful_bets']}"
+        text = f"📊 *系统状态 v3.0*\n\n"
+        text += f"📈 *API状态*\n• 缓存数据: {api_stats['缓存数据量']}期\n• 最新期号: {api_stats['最新期号']}\n• 成功率: {api_stats['成功率']}\n\n"
+        text += f"👥 *账户状态*\n• 总账户: {total_accounts}\n• 已登录: {logged}\n• 自动投注: {auto}\n• 成功投注: {sched_stats['game_stats']['successful_bets']}\n\n"
+        text += f"🤖 *集成预测器*\n• 近期胜率: {ensemble_stats.get('recent_win_rate', 'N/A')}\n• 模型权重: {', '.join([f'{k}={v:.0%}' for k,v in ensemble_stats.get('weights', {}).items()])}"
         kb = [[InlineKeyboardButton("🔄 刷新", callback_data="refresh_status")],
               [InlineKeyboardButton("🔙 返回", callback_data="menu:main")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
@@ -1237,7 +1554,10 @@ class PC28Bot:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "status":
             acc = self.account_manager.get_account(phone)
-            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 投注币种: {acc.currency}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {format_amount(acc.balance, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n• 总投注: {acc.total_bets}次\n• 净盈利: {format_amount(acc.total_profit - acc.total_loss, acc.currency)}"
+            net_profit = acc.total_profit - acc.total_loss
+            win_rate = f"{acc.total_wins / acc.total_bets:.1%}" if acc.total_bets > 0 else "N/A"
+            loss_count = acc.total_bets - acc.total_wins
+            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 投注币种: {acc.currency}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {format_amount(acc.balance, acc.currency)}\n\n📊 *投注统计*\n• 投注期数: {acc.total_bets}期\n• 赢了: {acc.total_wins}期\n• 输了: {loss_count}期\n• 胜率: {win_rate}\n• 净盈利: {format_amount(net_profit, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}"
             kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "listgroups":
@@ -1299,7 +1619,6 @@ class PC28Bot:
             await query.edit_message_text("❌ 无效币种")
             return
         await self.account_manager.update_account(phone, currency=currency)
-        # 清除余额缓存（不同币种余额不同）
         self.account_manager.balance_cache.pop(phone, None)
         await query.edit_message_text(f"✅ 投注币种已切换为 {currency}")
         await self._show_account_detail(query, user, phone)
@@ -1335,8 +1654,9 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
     print("=" * 40)
-    print("PC28 智能预测投注系统")
+    print("PC28 智能预测投注系统 v3.0")
     print("多币种支持: KKCOIN / USDT / CNY")
+    print("集成预测器: 趋势 + 概率 + V3 + 原始")
     print("=" * 40)
     try: Config.validate()
     except ValueError as e: print(f"❌ 配置错误: {e}"); return
