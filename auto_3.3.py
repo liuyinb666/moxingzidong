@@ -991,17 +991,11 @@ class AmountManager:
 class BettingStrategyManager:
     def __init__(self, account_manager):
         self.account_manager = account_manager
-        self.strategies = {
-            '保守': {'description': '保守策略', 'base_amount': 10000, 'max_amount': 100000, 'multiplier': 1.5, 'stop_loss': 100000, 'stop_win': 50000, 'stop_balance': 50000, 'resume_balance': 200000},
-            '平衡': {'description': '平衡策略', 'base_amount': 50000, 'max_amount': 500000, 'multiplier': 2.0, 'stop_loss': 500000, 'stop_win': 250000, 'stop_balance': 100000, 'resume_balance': 500000},
-            '激进': {'description': '激进策略', 'base_amount': 100000, 'max_amount': 1000000, 'multiplier': 2.5, 'stop_loss': 1000000, 'stop_win': 500000, 'stop_balance': 200000, 'resume_balance': 1000000},
-        }
+        # 已移除预设策略，改为用户自定义基础金额
 
     async def set_strategy(self, phone, strategy_name, user_id):
-        if strategy_name not in self.strategies: return False, "无效策略"
-        cfg = self.strategies[strategy_name]
-        await self.account_manager.update_account(phone, betting_strategy=strategy_name, risk_profile=strategy_name, bet_params={'base_amount': cfg['base_amount'], 'max_amount': cfg['max_amount'], 'multiplier': cfg['multiplier'], 'stop_loss': cfg['stop_loss'], 'stop_win': cfg['stop_win'], 'stop_balance': cfg.get('stop_balance', 0), 'resume_balance': cfg.get('resume_balance', 100000)})
-        return True, f"已设置为: {strategy_name}"
+        # 预设策略已移除，此方法保留但不再使用
+        return False, "预设策略已移除，请使用自定义基础金额功能"
 
 # ==================== 游戏调度器 ====================
 class GameScheduler:
@@ -1484,10 +1478,7 @@ class PC28Bot:
             parts = data.split(':')
             action, phone = parts[1], parts[2]
             await self._process_action(query, user, action, phone)
-        elif data.startswith("set_strategy:"):
-            parts = data.split(':')
-            phone, strategy = parts[1], parts[2]
-            await self._process_set_strategy(query, user, phone, strategy)
+        # 预设策略已移除，set_strategy回调不再处理
         elif data.startswith("set_group:"):
             group_id = int(data.split(':')[1])
             state = self.account_manager.get_user_state(user, 'account_selected')
@@ -1543,8 +1534,7 @@ class PC28Bot:
             [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
              InlineKeyboardButton("🚪 登出", callback_data=f"action:logout:{phone}")],
             [InlineKeyboardButton("💬 游戏群", callback_data=f"action:listgroups:{phone}")],
-            [InlineKeyboardButton("📈 金额策略", callback_data=f"action:setstrategy:{phone}"),
-             InlineKeyboardButton("💱 投注币种", callback_data=f"action:setcurrency:{phone}")],
+            [InlineKeyboardButton("💱 投注币种", callback_data=f"action:setcurrency:{phone}")],
             [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}")],
             [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"),
              InlineKeyboardButton("📊 投注统计", callback_data=f"action:status:{phone}")],
@@ -1655,17 +1645,10 @@ class PC28Bot:
                     await query.edit_message_text("📋 选择游戏群:", reply_markup=InlineKeyboardMarkup(kb))
                 except: await query.edit_message_text("❌ 获取群组列表失败")
             else: await query.edit_message_text("❌ 客户端未连接")
-        elif action == "setstrategy":
-            kb = [[InlineKeyboardButton(name, callback_data=f"set_strategy:{phone}:{name}")] for name in self.strategy_manager.strategies.keys()]
-            kb.append([InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")])
-            await query.edit_message_text("📊 选择投注策略:", reply_markup=InlineKeyboardMarkup(kb))
         elif action == "setcurrency":
             await self._show_currency_menu(query, user, phone)
 
-    async def _process_set_strategy(self, query, user, phone, strategy):
-        ok, msg = await self.strategy_manager.set_strategy(phone, strategy, user)
-        if ok: await self._show_account_detail(query, user, phone)
-        else: await query.edit_message_text(f"❌ {msg}")
+    # 预设策略已移除，_process_set_strategy方法不再使用
 
     async def _show_currency_menu(self, query, user, phone):
         acc = self.account_manager.get_account(phone)
