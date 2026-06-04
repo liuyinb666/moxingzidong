@@ -335,14 +335,13 @@ class EnsemblePredictor:
             adjusted_weight = weight * (1 + perf)
             vote_count[pred] = vote_count.get(pred, 0) + adjusted_weight
         
-        # 返回得票最少的（杀组思维）
-        kill_target = min(vote_count, key=vote_count.get)
+        # 返回得票最多的（杀组思维：大多数模型认为会开，所以杀它）
+        kill_target = max(vote_count, key=vote_count.get)
         
         # 计算置信度
         total_weight = sum(vote_count.values())
         if total_weight > 0:
-            # 杀组目标的得票率越低，置信度越高（因为杀的是冷门）
-            confidence = 1 - (vote_count.get(kill_target, 0) / total_weight)
+            confidence = vote_count.get(kill_target, 0) / total_weight
         else:
             confidence = 0.5
         
@@ -513,12 +512,46 @@ class ModelManager:
 
     def predict_kill(self, history: List[Dict]) -> Tuple[str, float]:
         """
-        预测杀组
+        预测杀组 - 全部701个模型参与投票
         返回: (杀组目标, 置信度)
         """
         if len(history) < 10:
             return "小单", 0.5
-        return self.ensemble.predict(history)
+        
+        # 先用滑动窗口验证每个模型的历史胜率
+        model_rates = {}
+        total = min(30, len(history) - 1)
+        for mid, md in self.all_models.items():
+            win = 0
+            for i in range(1, total):
+                try:
+                    pred = md["func"](history[i:])
+                    actual = history[i-1].get("combo", history[i-1].get("combination", ""))
+                    if actual and actual != pred[0]: win += 1
+                except: continue
+            model_rates[mid] = win / total if total > 0 else 0.5
+        
+        # 全部701模型加权投票
+        vote_count = {"小单": 0.0, "小双": 0.0, "大单": 0.0, "大双": 0.0}
+        for mid, md in self.all_models.items():
+            try:
+                pred = md["func"](history)
+                if pred and pred[0] in vote_count:
+                    weight = model_rates.get(mid, 0.5)
+                    vote_count[pred[0]] += weight
+            except: continue
+        
+        # 杀组：得票最多的（大多数模型认为会开，所以杀它）
+        kill_target = max(vote_count, key=vote_count.get)
+        
+        # 计算置信度
+        total_weight = sum(vote_count.values())
+        if total_weight > 0:
+            confidence = vote_count.get(kill_target, 0) / total_weight
+        else:
+            confidence = 0.5
+        
+        return kill_target, confidence
     
     def predict_kill_simple(self, history: List[Dict]) -> str:
         """简化版预测，只返回杀组目标"""
@@ -533,22 +566,10 @@ class ModelManager:
         """获取集成预测器统计信息"""
         return self.ensemble.get_stats()
     
-    # 保留原有的滑动窗口验证方法作为备用
+    # 已废弃：原滑动窗口验证选最优单个模型方法，现统一使用动态加权
     def predict_kill_legacy(self, history):
-        if len(history) < 10: return "小单"
-        best_id, best_rate = None, 0
-        total = min(50, len(history) - 1)
-        for mid, md in self.all_models.items():
-            win = 0
-            for i in range(1, total):
-                try:
-                    pred = md["func"](history[i:])
-                    actual = history[i-1].get("combo", history[i-1].get("combination", ""))
-                    if actual and actual != pred[0]: win += 1
-                except: continue
-            rate = win / total if total > 0 else 0
-            if rate > best_rate: best_rate, best_id = rate, mid
-        return self.all_models[best_id]["func"](history)[0] if best_id else "小单"
+        """【已废弃】请使用 predict_kill() 动态加权方法"""
+        return self.predict_kill_simple(history)
 
 # ==================== API模块 ====================
 class PC28API:
@@ -1186,21 +1207,13 @@ class GlobalScheduler:
                 last_kill = acc.last_prediction.get('kill')
                 if last_kill:
                     if actual_combo == last_kill:
-                        # 杀组失败（开出了杀组目标），算输
                         new_losses = acc.consecutive_losses + 1
-                        new_total_losses = acc.total_loss + acc.last_bet_total
-                        await self.account_manager.update_account(phone, consecutive_losses=new_losses, total_loss=new_total_losses)
-                        logger.log_game(f"[{phone}] 上期杀【{last_kill}】失败(开出{actual_combo}),连输: {new_losses}, 本期亏损: {acc.last_bet_total}")
+                        await self.account_manager.update_account(phone, consecutive_losses=new_losses)
+                        logger.log_game(f"[{phone}] 上期杀【{last_kill}】失败(开出{actual_combo}),连输: {new_losses}")
                     else:
-                        # 杀组成功（开出的不是杀组目标），算赢
-                        # PC28杀组赢：投了3注（除杀组外的3个组合），每注赔率约3倍，净盈利 = 赢注金额*3 - 总投注金额
-                        bet_per_type = acc.last_bet_total / 3 if acc.last_bet_total > 0 else 0
-                        win_amount = bet_per_type * 3  # 赢的那注赔率3倍
-                        net_profit = win_amount - acc.last_bet_total  # 净盈利 = 赢回 - 总投注
-                        new_total_profit = acc.total_profit + net_profit
-                        new_total_wins = acc.total_wins + 1
-                        await self.account_manager.update_account(phone, consecutive_losses=0, total_profit=new_total_profit, total_wins=new_total_wins)
-                        logger.log_game(f"[{phone}] 上期杀【{last_kill}】成功(开出{actual_combo}),连输清零, 本期净赚: {net_profit}")
+                        if acc.consecutive_losses > 0:
+                            await self.account_manager.update_account(phone, consecutive_losses=0)
+                            logger.log_game(f"[{phone}] 上期杀【{last_kill}】成功(开出{actual_combo}),连输清零")
         
         # 更新模型表现（在线学习）
         if actual_combo:
@@ -1466,8 +1479,6 @@ class PC28Bot:
         if acc.auto_betting: status += " | 🤖 自动投注"
         bet_button = "🛑 停止自动投注" if acc.auto_betting else "🤖 开启自动投注"
         net_profit = acc.total_profit - acc.total_loss
-        win_rate = f"{acc.total_wins / acc.total_bets:.1%}" if acc.total_bets > 0 else "N/A"
-        loss_count = acc.total_bets - acc.total_wins
 
         kb = [
             [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
@@ -1480,7 +1491,7 @@ class PC28Bot:
              InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
             [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
         ]
-        text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n\n📊 *投注统计*\n• 投注期数: {acc.total_bets}期\n• 赢了: {acc.total_wins}期\n• 输了: {loss_count}期\n• 胜率: {win_rate}\n• 净盈利: {format_amount(net_profit, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
+        text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n净盈利: {format_amount(net_profit, acc.currency)}\n基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
         try: await query_or_message.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
         except: await query_or_message.reply_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode='Markdown')
 
@@ -1554,10 +1565,7 @@ class PC28Bot:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "status":
             acc = self.account_manager.get_account(phone)
-            net_profit = acc.total_profit - acc.total_loss
-            win_rate = f"{acc.total_wins / acc.total_bets:.1%}" if acc.total_bets > 0 else "N/A"
-            loss_count = acc.total_bets - acc.total_wins
-            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 投注币种: {acc.currency}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {format_amount(acc.balance, acc.currency)}\n\n📊 *投注统计*\n• 投注期数: {acc.total_bets}期\n• 赢了: {acc.total_wins}期\n• 输了: {loss_count}期\n• 胜率: {win_rate}\n• 净盈利: {format_amount(net_profit, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}"
+            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 投注币种: {acc.currency}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {format_amount(acc.balance, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n• 总投注: {acc.total_bets}次\n• 净盈利: {format_amount(acc.total_profit - acc.total_loss, acc.currency)}"
             kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "listgroups":
