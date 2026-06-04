@@ -57,6 +57,7 @@ class Config:
     LOGIN_SELECT, LOGIN_CODE, LOGIN_PASSWORD = range(3)
     ADD_ACCOUNT = 10
     CHASE_NUMBERS, CHASE_PERIODS, CHASE_AMOUNT = range(11, 14)
+    SET_BASE_AMOUNT = 20
     MAX_ACCOUNTS_PER_USER = 5
     PREDICTION_HISTORY_SIZE = 20
     RISK_PROFILES = {'保守': 0.005, '稳定': 0.01, '激进': 0.02, '稳健型': 0.008, '平衡型': 0.015, '进取型': 0.03}
@@ -1298,6 +1299,13 @@ class PC28Bot:
             fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
         )
         self.application.add_handler(add_account_conv)
+        # 新增：修改基础金额对话处理器
+        set_base_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.set_base_amount_start, pattern=r'^action:set_base_amount:')],
+            states={Config.SET_BASE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_base_amount_input)]},
+            fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
+        )
+        self.application.add_handler(set_base_conv)
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_error_handler(self.error_handler)
         # 新增：查看预测统计的命令
@@ -1345,6 +1353,36 @@ class PC28Bot:
             await self._show_account_detail(update.message, user_id, phone)
         else:
             await update.message.reply_text(f"❌ {msg}")
+        return ConversationHandler.END
+
+    async def set_base_amount_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        phone = query.data.split(':')[2]
+        context.user_data['set_base_phone'] = phone
+        acc = self.account_manager.get_account(phone)
+        current = format_amount(acc.bet_params.base_amount, acc.currency) if acc else "未知"
+        await query.edit_message_text(f"📝 修改基础金额\n\n当前基础金额: {current}\n\n请输入新的基础金额(数字):\n\n点击 /cancel 取消")
+        return Config.SET_BASE_AMOUNT
+
+    async def set_base_amount_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        phone = context.user_data.get('set_base_phone')
+        if not phone:
+            await update.message.reply_text("❌ 操作超时，请重新选择账户")
+            return ConversationHandler.END
+        try:
+            amount = float(update.message.text.strip().replace(',', ''))
+        except ValueError:
+            await update.message.reply_text("❌ 请输入有效的数字")
+            return Config.SET_BASE_AMOUNT
+        ok, msg = await self.amount_manager.set_param(phone, 'base_amount', amount, user_id)
+        if ok:
+            await update.message.reply_text(f"✅ {msg}")
+            await self._show_account_detail(update.message, user_id, phone)
+        else:
+            await update.message.reply_text(f"❌ {msg}\n\n请重新输入或点击 /cancel 取消")
+            return Config.SET_BASE_AMOUNT
         return ConversationHandler.END
 
     async def login_select(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1510,6 +1548,7 @@ class PC28Bot:
             [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}")],
             [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"),
              InlineKeyboardButton("📊 投注统计", callback_data=f"action:status:{phone}")],
+            [InlineKeyboardButton("📝 修改基础金额", callback_data=f"action:set_base_amount:{phone}")],
             [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
         ]
         text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n净盈利: {format_amount(net_profit, acc.currency)}\n基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
