@@ -741,6 +741,9 @@ class Account:
     consecutive_wins: int = 0
     total_bets: int = 0
     total_wins: int = 0
+    total_losses: int = 0
+    win_periods: int = 0
+    lose_periods: int = 0
     last_bet_time: Optional[str] = None
     last_bet_period: Optional[str] = None
     last_bet_types: List[str] = field(default_factory=list)
@@ -1208,12 +1211,30 @@ class GlobalScheduler:
                 if last_kill:
                     if actual_combo == last_kill:
                         new_losses = acc.consecutive_losses + 1
-                        await self.account_manager.update_account(phone, consecutive_losses=new_losses)
+                        await self.account_manager.update_account(
+                            phone,
+                            consecutive_losses=new_losses,
+                            lose_periods=acc.lose_periods + 1,
+                            total_losses=acc.total_losses + 1
+                        )
                         logger.log_game(f"[{phone}] 上期杀【{last_kill}】失败(开出{actual_combo}),连输: {new_losses}")
                     else:
+                        new_wins = acc.win_periods + 1
                         if acc.consecutive_losses > 0:
-                            await self.account_manager.update_account(phone, consecutive_losses=0)
+                            await self.account_manager.update_account(
+                                phone,
+                                consecutive_losses=0,
+                                win_periods=new_wins,
+                                total_wins=acc.total_wins + 1
+                            )
                             logger.log_game(f"[{phone}] 上期杀【{last_kill}】成功(开出{actual_combo}),连输清零")
+                        else:
+                            await self.account_manager.update_account(
+                                phone,
+                                win_periods=new_wins,
+                                total_wins=acc.total_wins + 1
+                            )
+                            logger.log_game(f"[{phone}] 上期杀【{last_kill}】成功(开出{actual_combo})")
         
         # 更新模型表现（在线学习）
         if actual_combo:
@@ -1488,7 +1509,7 @@ class PC28Bot:
              InlineKeyboardButton("💱 投注币种", callback_data=f"action:setcurrency:{phone}")],
             [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}")],
             [InlineKeyboardButton("💰 查询余额", callback_data=f"action:balance:{phone}"),
-             InlineKeyboardButton("📊 账户状态", callback_data=f"action:status:{phone}")],
+             InlineKeyboardButton("📊 投注统计", callback_data=f"action:status:{phone}")],
             [InlineKeyboardButton("🔙 返回", callback_data="menu:accounts")]
         ]
         text = f"📱 *账户: {display}*\n\n状态: {status}\n币种: {acc.currency}\n余额: {format_amount(acc.balance, acc.currency)}\n净盈利: {format_amount(net_profit, acc.currency)}\n基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n\n选择操作:"
@@ -1565,7 +1586,20 @@ class PC28Bot:
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "status":
             acc = self.account_manager.get_account(phone)
-            text = f"📱 账户状态\n\n• 手机号: {acc.phone}\n• 登录: {'✅' if acc.is_logged_in else '❌'}\n• 自动投注: {'✅' if acc.auto_betting else '❌'}\n• 投注币种: {acc.currency}\n• 游戏群: {acc.game_group_name or '未设置'}\n• 余额: {format_amount(acc.balance, acc.currency)}\n• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n• 总投注: {acc.total_bets}次\n• 净盈利: {format_amount(acc.total_profit - acc.total_loss, acc.currency)}"
+            net_profit = acc.total_profit - acc.total_loss
+            win_rate_str = f"{acc.total_wins / acc.total_bets:.1%}" if acc.total_bets > 0 else "N/A"
+            text = f"📊 投注统计\n\n"
+            text += f"📱 账户: {acc.phone}\n"
+            text += f"状态: {'✅ 已登录' if acc.is_logged_in else '❌ 未登录'}\n"
+            text += f"币种: {acc.currency}\n"
+            text += f"余额: {format_amount(acc.balance, acc.currency)}\n\n"
+            text += f"📈 投注统计\n"
+            text += f"• 投注期数: {acc.total_bets}期\n"
+            text += f"• 赢了: {acc.win_periods}期\n"
+            text += f"• 输了: {acc.lose_periods}期\n"
+            text += f"• 胜率: {win_rate_str}\n"
+            text += f"• 净盈利: {format_amount(net_profit, acc.currency)}\n"
+            text += f"• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}"
             kb = [[InlineKeyboardButton("🔙 返回", callback_data=f"select_account:{phone}")]]
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb))
         elif action == "listgroups":
