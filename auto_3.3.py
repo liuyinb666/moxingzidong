@@ -634,7 +634,8 @@ class Account:
     chase_numbers: List[int] = field(default_factory=list)
     chase_periods: int = 0
     chase_current: int = 0
-    chase_amount: int = 0    chase_stop_reason: Optional[str] = None
+    chase_amount: int = 0    
+    chase_stop_reason: Optional[str] = None
     streak_records_double: List[Dict] = field(default_factory=list)
     streak_records_kill: List[Dict] = field(default_factory=list)
     current_streak_type_double: Optional[str] = None
