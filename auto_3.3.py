@@ -56,6 +56,10 @@ class Config:
     SET_CHASE_AMOUNT = 13
     SET_CHASE_PERIODS = 14
     SET_STOP_BALANCE = 15
+    SET_BET_DELAY = 16
+    DEFAULT_BET_DELAY = 20
+    MIN_BET_DELAY = 0
+    MAX_BET_DELAY = 180
     MAX_ACCOUNTS_PER_USER = 5
     PREDICTION_HISTORY_SIZE = 20
     AVAILABLE_CURRENCIES = ["KKCOIN", "USDT", "CNY"]
@@ -440,6 +444,7 @@ class PC28API:
 class BetParams:
     base_amount: float = Config.DEFAULT_BASE_AMOUNT
     stop_balance: float = Config.DEFAULT_STOP_BALANCE
+    bet_delay: int = Config.DEFAULT_BET_DELAY
 
 @dataclass
 class ChaseConfig:
@@ -520,6 +525,10 @@ class AccountManager:
                         acc_data['total_wins'] = 0
                     if 'stop_reason' not in acc_data:
                         acc_data['stop_reason'] = None
+                    if 'bet_delay' not in acc_data.get('bet_params', {}):
+                        if 'bet_params' not in acc_data:
+                            acc_data['bet_params'] = {}
+                        acc_data['bet_params']['bet_delay'] = Config.DEFAULT_BET_DELAY
                     self.accounts[phone] = Account(**acc_data)
             if self.user_states_file.exists():
                 with open(self.user_states_file, 'r', encoding='utf-8') as f:
@@ -958,11 +967,19 @@ class GlobalScheduler:
         kill_target, confidence = self.model.predict_kill(history)
         logger.log_prediction(0, "预测", f"期号:{qihao} 杀:{kill_target} 置信度:{confidence:.2f}")
 
-        await asyncio.sleep(20)
+        # 为每个自动投注账户创建独立的延迟投注任务
         for phone, acc in self.account_manager.accounts.items():
             if acc.auto_betting and acc.is_logged_in and acc.game_group_id:
-                self._create_task(self.game_scheduler.execute_bet(phone, kill_target, latest, confidence))
+                delay = acc.bet_params.bet_delay
+                self._create_task(self._delayed_bet(phone, kill_target, latest, confidence, delay))
         self.last_qihao = qihao
+
+    async def _delayed_bet(self, phone, kill_target, latest, confidence, delay):
+        """按账户配置的延迟时间执行投注"""
+        if delay > 0:
+            logger.log_betting(0, "延迟投注等待", f"账户:{phone} 延迟:{delay}秒")
+            await asyncio.sleep(delay)
+        await self.game_scheduler.execute_bet(phone, kill_target, latest, confidence)
 
 # ==================== 主Bot类 ====================
 class PC28Bot:
@@ -1032,6 +1049,13 @@ class PC28Bot:
             fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
         )
         self.application.add_handler(set_stop_balance_conv)
+
+        set_bet_delay_conv = ConversationHandler(
+            entry_points=[CallbackQueryHandler(self.set_bet_delay_start, pattern=r'^set_bet_delay:')],
+            states={Config.SET_BET_DELAY: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_bet_delay_input)]},
+            fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
+        )
+        self.application.add_handler(set_bet_delay_conv)
         
         self.application.add_handler(CallbackQueryHandler(self.handle_callback))
         self.application.add_error_handler(self.error_handler)
@@ -1150,6 +1174,46 @@ class PC28Bot:
         except ValueError:
             await update.message.reply_text("❌ 请输入有效的数字")
             return Config.SET_STOP_BALANCE
+        return ConversationHandler.END
+
+    async def set_bet_delay_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        query = update.callback_query
+        await query.answer()
+        phone = query.data.split(':')[1]
+        context.user_data['setting_phone'] = phone
+        acc = self.account_manager.get_account(phone)
+        current_delay = acc.bet_params.bet_delay
+        await query.edit_message_text(
+            f"⏱️ 请输入投注延迟秒数 (当前: {current_delay}秒)\n\n"
+            f"新期号出现后，等待指定秒数再执行投注\n"
+            f"范围: {Config.MIN_BET_DELAY}-{Config.MAX_BET_DELAY}秒\n"
+            f"默认: {Config.DEFAULT_BET_DELAY}秒\n"
+            f"设为0表示检测到新期号立即投注\n\n"
+            f"点击 /cancel 取消"
+        )
+        return Config.SET_BET_DELAY
+
+    async def set_bet_delay_input(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        user_id = update.effective_user.id
+        phone = context.user_data.get('setting_phone')
+        if not phone:
+            await update.message.reply_text("❌ 会话已过期")
+            return ConversationHandler.END
+        try:
+            delay = int(update.message.text.strip())
+            if delay < Config.MIN_BET_DELAY or delay > Config.MAX_BET_DELAY:
+                await update.message.reply_text(f"❌ 延迟秒数范围: {Config.MIN_BET_DELAY}-{Config.MAX_BET_DELAY}")
+                return Config.SET_BET_DELAY
+            acc = self.account_manager.get_account(phone)
+            await self.account_manager.update_account(phone, bet_params={'bet_delay': delay})
+            if delay == 0:
+                await update.message.reply_text(f"✅ 已设置为立即投注（无延迟）")
+            else:
+                await update.message.reply_text(f"✅ 投注延迟已设置为 {delay}秒")
+            await self._show_account_detail(update.message, user_id, phone)
+        except ValueError:
+            await update.message.reply_text("❌ 请输入有效的整数秒数")
+            return Config.SET_BET_DELAY
         return ConversationHandler.END
 
     async def set_chase_numbers_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1500,6 +1564,7 @@ class PC28Bot:
         lose_count = acc.total_bets - acc.total_wins
 
         stop_balance_text = f"🛑 停止余额: {format_amount(acc.bet_params.stop_balance, acc.currency)}" if acc.bet_params.stop_balance > 0 else "🛑 停止余额: 未设置"
+        bet_delay_text = f"⏱️ 投注延迟: {acc.bet_params.bet_delay}秒" if acc.bet_params.bet_delay > 0 else "⏱️ 投注延迟: 立即投注"
 
         kb = [
             [InlineKeyboardButton("🔐 登录", callback_data=f"login_select:{phone}"),
@@ -1507,6 +1572,7 @@ class PC28Bot:
             [InlineKeyboardButton("💬 游戏群", callback_data=f"action:listgroups:{phone}")],
             [InlineKeyboardButton("💰 设置基础金额", callback_data=f"set_base:{phone}")],
             [InlineKeyboardButton("🛑 设置停止余额", callback_data=f"set_stop_balance:{phone}")],
+            [InlineKeyboardButton("⏱️ 设置投注延迟", callback_data=f"set_bet_delay:{phone}")],
             [InlineKeyboardButton("🎯 设置追号", callback_data=f"set_chase_numbers:{phone}")],
             [InlineKeyboardButton("💱 切换币种", callback_data=f"action:setcurrency:{phone}")],
             [InlineKeyboardButton(bet_button, callback_data=f"action:toggle_bet:{phone}")],
@@ -1523,6 +1589,7 @@ class PC28Bot:
         text += f"基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n"
         text += f"倍投倍数: 固定2倍\n"
         text += f"{stop_balance_text}\n"
+        text += f"{bet_delay_text}\n"
         text += f"投注统计: {acc.total_bets}期 | ✅ 赢了: {acc.total_wins} | ❌ 输了: {lose_count} | 胜率: {win_rate:.1f}%\n"
         
         if acc.chase.enabled:
@@ -1646,6 +1713,7 @@ class PC28Bot:
             text += f"• 基础金额: {format_amount(acc.bet_params.base_amount, acc.currency)}\n"
             text += f"• 倍投倍数: 固定2倍\n"
             text += f"• 停止余额: {format_amount(acc.bet_params.stop_balance, acc.currency) if acc.bet_params.stop_balance > 0 else '未设置'}\n"
+            text += f"• 投注延迟: {acc.bet_params.bet_delay}秒\n"
             text += f"• 总投注: {acc.total_bets}次\n"
             text += f"• ✅ 赢了: {acc.total_wins}次\n"
             text += f"• ❌ 输了: {lose_count}次\n"
