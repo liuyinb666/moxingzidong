@@ -57,7 +57,7 @@ class Config:
     SET_CHASE_PERIODS = 14
     SET_STOP_BALANCE = 15
     SET_BET_DELAY = 16
-    DEFAULT_BET_DELAY = 20
+    DEFAULT_BET_DELAY = 30
     MIN_BET_DELAY = 0
     MAX_BET_DELAY = 180
     MAX_ACCOUNTS_PER_USER = 5
@@ -159,193 +159,127 @@ logger = BotLogger()
 
 COMBOS = ["小单", "小双", "大单", "大双"]
 
-# ==================== 预测算法 ====================
+# ==================== 701个杀组模型 (从初始版模型.py迁移) ====================
+ALL_MODELS = {}
 
-def trend_based_prediction(history: List[Dict]) -> List[str]:
-    if len(history) < 15:
-        return ["小单"]
-    combos = [h.get("combo", h.get("combination", "小单")) for h in history[:20]]
-    last_3 = combos[:3]
-    if len(set(last_3)) == 1:
-        opposite = {"大单":"小双", "小双":"大单", "大双":"小单", "小单":"大双"}
-        return [opposite.get(last_3[0], "小单")]
-    size_counter = Counter([c[0] for c in combos])
-    parity_counter = Counter([c[1] for c in combos])
-    recent_size = [c[0] for c in combos[:10]]
-    recent_parity = [c[1] for c in combos[:10]]
-    if recent_size.count(recent_size[0]) >= 7:
-        predicted_size = "小" if recent_size[0] == "大" else "大"
-    else:
-        predicted_size = min(size_counter, key=size_counter.get)
-    if recent_parity.count(recent_parity[0]) >= 7:
-        predicted_parity = "双" if recent_parity[0] == "单" else "单"
-    else:
-        predicted_parity = min(parity_counter, key=parity_counter.get)
-    return [predicted_size + predicted_parity]
-
-def probability_distribution_prediction(history: List[Dict]) -> List[str]:
-    if len(history) < 20:
-        return ["小单"]
-    combos = [h.get("combo", h.get("combination", "小单")) for h in history[:30]]
-    transitions = {}
-    for i in range(len(combos) - 1):
-        curr, next_c = combos[i], combos[i+1]
-        if curr not in transitions:
-            transitions[curr] = {}
-        transitions[curr][next_c] = transitions[curr].get(next_c, 0) + 1
-    for curr in transitions:
-        total = sum(transitions[curr].values())
-        if total > 0:
-            for next_c in transitions[curr]:
-                transitions[curr][next_c] /= total
-    current = combos[0]
-    if current in transitions and transitions[current]:
-        probs = transitions[current]
-        predicted = min(probs, key=probs.get)
-        return [predicted]
-    return ["小单"]
-
-def v3_enhanced_prediction(history: List[Dict]) -> List[str]:
-    if len(history) < 10:
-        return ["小单"]
+def old_slayer_factory(history_data, cfg):
     forms = ["大单", "小单", "大双", "小双"]
-    h = [x.get("combo", x.get("combination", "小单")) for x in history[:30]]
-    if not h:
-        return ["小单"]
-    weighted_counts = {f: 0 for f in forms}
-    for i, combo in enumerate(h):
-        weight = 1.0 / (i + 1)
-        weighted_counts[combo] = weighted_counts.get(combo, 0) + weight
-    unique_recent = len(set(h[:5]))
-    if unique_recent == 1:
-        opposite = {"大单":"小双", "小双":"大单", "大双":"小单", "小单":"大双"}
-        return [opposite.get(h[0], "小单")]
-    elif unique_recent <= 2:
-        return [min(weighted_counts, key=weighted_counts.get)]
+    h_slice = [h.get("combo", h.get("combination", "小单")) for h in history_data[:cfg['depth']]]
+    counts = Counter(h_slice)
+    if cfg['type'] == "FREQ":
+        target = max(forms, key=lambda x: counts.get(x, 0)) if cfg['bias'] == "HOT" else min(forms, key=lambda x: counts.get(x, 0))
+    elif cfg['type'] == "GAP":
+        last_idx = forms.index(h_slice[0]) if h_slice else 0
+        target = forms[(last_idx + cfg['offset']) % 4]
     else:
-        return [min(weighted_counts, key=weighted_counts.get)]
+        nbr = int(history_data[0].get('nbr', history_data[0].get('qihao', 0))) if history_data else 0
+        target = forms[(nbr * cfg['m'] + cfg['s']) % 4]
+    return [target]
 
-def original_armor_prediction(history: List[Dict]) -> List[str]:
-    if len(history) < 15:
-        return ["小单"]
-    try:
-        r10=[i.get("combo", i.get("combination", "小单")) for i in history[:10]]
-        r40=[i.get("combo", i.get("combination", "小单")) for i in history[:min(40,len(history))]]
-        c40=Counter(r40); curr,prev=r10[0],r10[1]
-        opp={"大单":"小双","小双":"大单","大双":"小单","小单":"大双"}
-        af=["大单","小单","大双","小双"]
-        if curr==prev: s=opp.get(curr,"小单")
-        elif len(set(r10[:5]))>=3: s=sorted(af,key=lambda x:abs(c40.get(x,10)-10))[0]
-        else:
-            om={}
-            for f in af:
-                try: om[f]=r40.index(f)
-                except: om[f]=40
-            s=sorted(om,key=om.get,reverse=True)[0]
-        return [s]
-    except: return ["小单"]
+for i in range(1, 301):
+    cfg = {'depth': 10 + (i % 90), 'type': "FREQ" if i <= 100 else ("GAP" if i <= 200 else "MATH"), 'bias': "HOT" if i % 2 == 0 else "COLD", 'offset': (i * 7) % 4, 'm': (i * 13) % 17, 's': i % 5}
+    ALL_MODELS[i] = {"func": lambda h, c=cfg: old_slayer_factory(h, c), "info": {"id": i, "name": f"杀组 M{i}", "type": "杀组"}}
 
-# ==================== 集成预测器 ====================
+NEW_FORMS = ["大单", "小单", "大双", "小双"]
 
-class EnsemblePredictor:
-    def __init__(self):
-        self.models = {
-            "trend": trend_based_prediction,
-            "probability": probability_distribution_prediction,
-            "v3": v3_enhanced_prediction,
-            "original": original_armor_prediction,
-        }
-        self.weights = Config.ENSEMBLE_WEIGHTS.copy()
-        self.performance_history = {name: deque(maxlen=50) for name in self.models}
-        self.prediction_history = deque(maxlen=Config.PREDICTION_HISTORY_SIZE)
-        
-    def predict(self, history: List[Dict]) -> Tuple[str, float]:
-        if len(history) < 15:
-            return "小单", 0.5
-        predictions = {}
-        for name, model in self.models.items():
-            try:
-                pred = model(history)[0]
-                predictions[name] = pred
-            except Exception as e:
-                logger.log_error(0, f"模型{name}预测失败", e)
-                predictions[name] = "小单"
-        vote_count = {}
-        for name, pred in predictions.items():
-            weight = self.weights.get(name, 1.0)
-            perf = self._get_recent_performance(name)
-            adjusted_weight = weight * (1 + perf)
-            vote_count[pred] = vote_count.get(pred, 0) + adjusted_weight
-        kill_target = min(vote_count, key=vote_count.get)
-        total_weight = sum(vote_count.values())
-        if total_weight > 0:
-            confidence = 1 - (vote_count.get(kill_target, 0) / total_weight)
-        else:
-            confidence = 0.5
-        self.prediction_history.append({
-            'time': datetime.now(),
-            'kill': kill_target,
-            'confidence': confidence,
-            'predictions': predictions.copy()
-        })
-        return kill_target, confidence
-    
-    def _get_recent_performance(self, model_name: str) -> float:
-        history = self.performance_history.get(model_name, [])
-        if len(history) < 5:
-            return 0
-        recent = list(history)[-20:]
-        weights = [1.0 / (i + 1) for i in range(len(recent))]
-        total_weight = sum(weights)
-        if total_weight == 0:
-            return 0
-        weighted_acc = sum(w * acc for w, acc in zip(weights, recent)) / total_weight
-        return (weighted_acc - 0.5) * 1.0
-    
-    def update_performance(self, actual_combo: str):
-        if not self.prediction_history:
-            return
-        last_pred = self.prediction_history[-1]
-        predicted_kill = last_pred['kill']
-        predictions = last_pred.get('predictions', {})
-        is_win = (actual_combo != predicted_kill)
-        for name, pred in predictions.items():
-            model_win = (actual_combo != pred)
-            self.performance_history[name].append(1.0 if model_win else 0.0)
-        for name in self.models:
-            perf = self._get_recent_performance(name)
-            adjustment = perf * 0.05
-            self.weights[name] = max(0.05, min(0.5, self.weights.get(name, 0.1) + adjustment))
-        total = sum(self.weights.values())
-        if total > 0:
-            for name in self.weights:
-                self.weights[name] /= total
-        logger.log_prediction(0, "预测结果反馈", 
-                             f"杀:{predicted_kill} 开:{actual_combo} {'✓赢' if is_win else '✗输'} 置信度:{last_pred['confidence']:.2f}")
-    
-    def get_stats(self) -> Dict:
-        recent_perf = list(self.performance_history.get("trend", []))[-20:]
-        win_rate = sum(recent_perf) / len(recent_perf) if recent_perf else 0
-        return {
-            'weights': self.weights.copy(),
-            'recent_win_rate': f"{win_rate:.1%}",
-            'prediction_count': len(self.prediction_history)
-        }
+def slice_data_hist(hist_data, mode, depth):
+    h = [x.get("combo", x.get("combination", "小单")) for x in hist_data[-depth:]] if hist_data else []
+    if not h: return [random.choice(NEW_FORMS)]
+    if mode == 0: return h
+    elif mode == 1: return h[::-1]
+    elif mode == 2: return h[::2] if len(h)>=2 else h
+    elif mode == 3: return h[1::2] if len(h)>=2 else h
+    else: return h[len(h)//2:]
+
+def calc_feature(hist, ftype):
+    res = {f: 0 for f in NEW_FORMS}
+    if not hist: return res
+    if ftype == 0:
+        for x in hist: res[x] = res.get(x, 0) + 1
+    elif ftype == 1:
+        last = {f: -1 for f in NEW_FORMS}
+        for i, x in enumerate(hist): last[x] = i
+        for f in NEW_FORMS: res[f] = len(hist) - last[f]
+    elif ftype == 2:
+        for i in range(1, len(hist)):
+            if hist[i] == hist[i-1]: res[hist[i]] = res.get(hist[i], 0) + 1
+    elif ftype == 3:
+        for i in range(1, len(hist)):
+            if hist[i] != hist[i-1]: res[hist[i]] = res.get(hist[i], 0) + 1
+    return res
+
+def new_kill_model(hist_data, cfg, mid):
+    data = slice_data_hist(hist_data, cfg["slice"], cfg["depth"])
+    feat = calc_feature(data, cfg["feature"])
+    scores = {}
+    for i, f in enumerate(NEW_FORMS):
+        base = feat[f]
+        noise = math.sin(mid * 0.31 + i) + math.cos(mid * 0.17 * (i+1)) + ((mid % 7) - 3) * 0.1
+        if cfg["mode"] == 0: score = base + noise
+        elif cfg["mode"] == 1: score = -base + noise
+        else: score = math.log(base + 1) + noise
+        scores[f] = score
+    return [min(scores, key=scores.get)]
+
+for i in range(1, 301):
+    mid = i + 300
+    cfg = {"depth": 10 + (i % 90), "slice": i % 5, "feature": i % 4, "mode": i % 3}
+    ALL_MODELS[mid] = {"func": lambda h, c=cfg, m=mid: new_kill_model(h, c, m), "info": {"id": mid, "name": f"新杀组 M{i}", "type": "杀组"}}
+
+def new_kill_v3(history, mid):
+    forms = ["大单", "小单", "大双", "小双"]
+    h = [x.get("combo", x.get("combination", "小单")) for x in history[-30:]] if history else forms
+    counts = Counter(h)
+    idx = mid % 5
+    if idx == 0: target = max(forms, key=lambda x: counts.get(x, 0))
+    elif idx == 1: target = min(forms, key=lambda x: counts.get(x, 0))
+    elif idx == 2: target = {"大单":"小双","小双":"大单","大双":"小单","小单":"大双"}.get(h[0] if h else "小单", "小单")
+    elif idx == 3: target = forms[int(history[0].get('nbr', history[0].get('qihao', 0)) if history else 0) % 4]
+    else: total = sum(counts.values()) + 1; target = min(forms, key=lambda x: (counts.get(x,0)+1)/total)
+    return [target]
+
+for i in range(1, 101):
+    mid = i + 600
+    ALL_MODELS[mid] = {"func": lambda h, m=mid: new_kill_v3(h, m), "info": {"id": mid, "name": f"V3杀组 M{i}", "type": "杀组"}}
+
+ALL_MODELS[701] = {"func": lambda h: original_armor_prediction(h), "info": {"id": 701, "name": "Armor V23 杀组(原)", "type": "杀组"}}
+
+# ==================== 预测算法 ====================
 
 class ModelManager:
     def __init__(self):
-        self.ensemble = EnsemblePredictor()
+        self.all_models = ALL_MODELS
 
     def predict_kill(self, history: List[Dict]) -> Tuple[str, float]:
+        """使用Legacy 701模型滑动窗口选优"""
         if len(history) < 10:
             return "小单", 0.5
-        return self.ensemble.predict(history)
+        kill = self.predict_kill_legacy(history)
+        return kill, 0.5
+
+    def predict_kill_legacy(self, history):
+        """701个杀组模型滑动窗口验证选最优"""
+        if len(history) < 10: return "小单"
+        best_id, best_rate = None, 0
+        total = min(50, len(history) - 1)
+        for mid, md in self.all_models.items():
+            win = 0
+            for i in range(1, total):
+                try:
+                    pred = md["func"](history[i:])
+                    actual = history[i-1].get("combo", history[i-1].get("combination", ""))
+                    if actual and actual != pred[0]: win += 1
+                except: continue
+            rate = win / total if total > 0 else 0
+            if rate > best_rate: best_rate, best_id = rate, mid
+        return self.all_models[best_id]["func"](history)[0] if best_id else "小单"
     
     def update_prediction_result(self, actual_combo: str):
-        self.ensemble.update_performance(actual_combo)
+        """Legacy模式下无需在线学习更新"""
+        pass
     
     def get_ensemble_stats(self) -> Dict:
-        return self.ensemble.get_stats()
+        return {"mode": "legacy_701", "description": "使用701个杀组模型滑动窗口选优"}
 
 # ==================== API模块 ====================
 class PC28API:
