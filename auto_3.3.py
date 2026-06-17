@@ -261,7 +261,7 @@ class ModelManager:
         """701个杀组模型滑动窗口验证选最优"""
         if len(history) < 10: return "小单"
         best_id, best_rate = None, 0
-        total = min(50, len(history) - 1)
+        total = min(20, len(history) - 1)
         for mid, md in self.all_models.items():
             win = 0
             for i in range(1, total):
