@@ -95,7 +95,7 @@ class Config:
     # 推荐Top5: 胜率稳定80%+, 最大连挂2期, 抗波动能力强
     KILL_ELITE_COUNT = 5
     # 模型评分窗口大小 - 评估模型近期表现的历史期数
-    KILL_SCORE_WINDOW = 30
+    KILL_SCORE_WINDOW = 50
     # 时间衰减因子 - 近期预测结果权重更高
     KILL_DECAY_FACTOR = 0.95
     # 连出反转阈值 - 连续出现N期后触发反转策略
@@ -104,6 +104,9 @@ class Config:
     KILL_MARKOV_ORDER = 2
     # 启用模式匹配长度
     KILL_PATTERN_LENGTH = 3
+    # 特殊组合倍率 - 投注的3个组合中，指定的组合金额乘以此倍率
+    # 例如: {"大双": 1.2, "小单": 1.2} 表示大双和小单下注金额x1.2
+    KILL_SPECIAL_COMBO_MULTIPLIER = {"大双": 1.2, "小单": 1.2}
 
     @classmethod
     def init_dirs(cls):
@@ -1348,6 +1351,9 @@ class GameScheduler:
 
         for t in bet_types:
             calculated_amount = adjusted_base * current_multiplier
+            # 特殊组合倍率
+            special_multiplier = Config.KILL_SPECIAL_COMBO_MULTIPLIER.get(t, 1.0)
+            calculated_amount *= special_multiplier
             calculated_amount = min(calculated_amount, max_limit)
             calculated_amount = max(calculated_amount, min_limit)
             
@@ -1379,7 +1385,13 @@ class GameScheduler:
                 total_bets=acc.total_bets + 1,
                 last_prediction_confidence=confidence
             )
-            logger.log_betting(0, "杀组投注", f"账户:{phone} 杀:{kill_target} 金额:{format_amount(adjusted_base * current_multiplier, acc.currency)}/个 总:{format_amount(total_bet_amount, acc.currency)} 倍投:{current_multiplier:.0f}倍")
+            # 构建特殊组合信息
+            special_info = ""
+            if Config.KILL_SPECIAL_COMBO_MULTIPLIER:
+                special_combos_in_bet = [t for t in bet_types if t in Config.KILL_SPECIAL_COMBO_MULTIPLIER]
+                if special_combos_in_bet:
+                    special_info = f" 特殊:{','.join(special_combos_in_bet)}x{list(Config.KILL_SPECIAL_COMBO_MULTIPLIER.values())[0]}"
+            logger.log_betting(0, "杀组投注", f"账户:{phone} 杀:{kill_target} 金额:{format_amount(adjusted_base * current_multiplier, acc.currency)}/个 总:{format_amount(total_bet_amount, acc.currency)} 倍投:{current_multiplier:.0f}倍{special_info}")
             self.game_stats['successful_bets'] += 1
         except Exception as e:
             logger.log_error(0, f"投注失败 {phone}", e)
@@ -1772,24 +1784,14 @@ class PC28Bot:
         
         set_chase_numbers_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.set_chase_numbers_start, pattern=r'^set_chase_numbers:')],
-            states={Config.SET_CHASE_NUMBERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_chase_numbers_input)]},
+            states={
+                Config.SET_CHASE_NUMBERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_chase_numbers_input)],
+                Config.SET_CHASE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_chase_amount_input)],
+                Config.SET_CHASE_PERIODS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_chase_periods_input)],
+            },
             fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
         )
         self.application.add_handler(set_chase_numbers_conv)
-        
-        set_chase_amount_conv = ConversationHandler(
-            entry_points=[CallbackQueryHandler(self.set_chase_amount_start, pattern=r'^set_chase_amount:')],
-            states={Config.SET_CHASE_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_chase_amount_input)]},
-            fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
-        )
-        self.application.add_handler(set_chase_amount_conv)
-        
-        set_chase_periods_conv = ConversationHandler(
-            entry_points=[CallbackQueryHandler(self.set_chase_periods_start, pattern=r'^set_chase_periods:')],
-            states={Config.SET_CHASE_PERIODS: [MessageHandler(filters.TEXT & ~filters.COMMAND, self.set_chase_periods_input)]},
-            fallbacks=[CommandHandler('cancel', self.cmd_cancel)],
-        )
-        self.application.add_handler(set_chase_periods_conv)
         
         set_stop_balance_conv = ConversationHandler(
             entry_points=[CallbackQueryHandler(self.set_stop_balance_start, pattern=r'^set_stop_balance:')],
@@ -2119,6 +2121,16 @@ class PC28Bot:
             await query.edit_message_text("账户不存在")
             return ConversationHandler.END
         if acc.is_logged_in:
+            # 即使已登录，也刷新一次余额
+            try:
+                balance = await self.game_scheduler.get_balance(phone)
+                if balance:
+                    if acc.initial_balance == 0:
+                        await self.account_manager.update_account(phone, initial_balance=balance, balance=balance)
+                    else:
+                        await self.account_manager.update_account(phone, balance=balance)
+            except Exception as e:
+                logger.log_error(query.from_user.id, f"刷新余额失败 {phone}", e)
             await self._show_account_detail(query, query.from_user.id, phone)
             return ConversationHandler.END
         client = self.account_manager.create_client(phone)
