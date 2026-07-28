@@ -39,7 +39,7 @@ class MarketData:
     combination: str
 
 class RiskManager:
-    def __init__(self, daily_stop_loss: float = 0.0, daily_stop_profit: float = 0.0):
+    def __init__(self, daily_stop_loss: float = 99999999999999999.0, daily_stop_profit: float = 99999999999999.0):
         self.daily_stop_loss = daily_stop_loss
         self.daily_stop_profit = daily_stop_profit
         self.daily_pnl = 0.0
