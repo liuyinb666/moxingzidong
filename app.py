@@ -1,12 +1,11 @@
 import os
-import re
 import json
 import asyncio
 import logging
 import threading
 import random
 from dataclasses import dataclass
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Dict, Any
 import aiohttp
 import gradio as gr
 from telethon import TelegramClient, events, Button
@@ -16,7 +15,7 @@ from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, P
 def get_type(s: int) -> str:
     return ('大' if s >= 14 else '小') + ('单' if s % 2 else '双')
 
-# ==================== 2. 风控管理系统（已移除熔断与复杂倍投） ====================
+# ==================== 2. 风控管理系统 ====================
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
@@ -39,14 +38,16 @@ class MarketData:
     combination: str
 
 class RiskManager:
-    def __init__(self, daily_stop_loss: float = 99999999999999999.0, daily_stop_profit: float = 99999999999999.0):
+    def __init__(self, daily_stop_loss: float = 3000.0, daily_stop_profit: float = 5000.0):
         self.daily_stop_loss = daily_stop_loss
         self.daily_stop_profit = daily_stop_profit
         self.daily_pnl = 0.0
 
     def can_bet(self) -> tuple[bool, str]:
-        if self.daily_pnl <= -self.daily_stop_loss: return False, "已触及每日止损线"
-        if self.daily_pnl >= self.daily_stop_profit: return False, "已触及每日止盈线"
+        if self.daily_stop_loss > 0 and self.daily_pnl <= -self.daily_stop_loss:
+            return False, f"已触及每日止损线 ({self.daily_stop_loss})"
+        if self.daily_stop_profit > 0 and self.daily_pnl >= self.daily_stop_profit:
+            return False, f"已触及每日止盈线 ({self.daily_stop_profit})"
         return True, "运行正常"
 
     def add_pnl(self, amount: float):
@@ -86,20 +87,16 @@ class UserState:
         self.custom_suffix = ""  
         self.last_betted_issue = ""
 
-        # 模式配置（仅保留ABC球）
         self.selected_modes = ["ball"]
         self.selected_balls = ["a"] 
 
-        # ABC独立设置
         self.ball_bet_amount = 100.0
-        self.abc_kill_count = 1           # 每个球杀码数量（1-9）
-        self.abc_martingale_multiplier = 2.0  # ABC倍投倍数
-        self.abc_consecutive_losses = 0   # ABC连败次数
+        self.abc_kill_count = 1
+        self.abc_martingale_multiplier = 2.0
+        self.abc_consecutive_losses = 0
 
-        # 上期ABC杀球记录 {b_char: [killed_digits]}
         self.last_ball_kills = {}
 
-        # 附加下注特码与豹子配置
         self.extra_special_numbers = []  
         self.extra_bauzi = False         
         self.extra_bet_amounts = {
@@ -122,7 +119,7 @@ class UserState:
                         self.groups = data.get("groups", [])
                         self.custom_delay = data.get("custom_delay", 12.0)
                         self.custom_suffix = data.get("custom_suffix", "")
-                        # 兼容旧数据：过滤掉已删除的模式
+                        self.last_betted_issue = data.get("last_betted_issue", "")
                         loaded_modes = data.get("selected_modes", ["ball"])
                         self.selected_modes = [m for m in loaded_modes if m == "ball"]
                         if not self.selected_modes:
@@ -146,10 +143,16 @@ class UserState:
             try:
                 with open(self.file_path, "w", encoding="utf-8") as f:
                     json.dump({
-                        "user_id": self.user_id, "is_logged_in": self.is_logged_in,
-                        "is_active": self.is_active, "phone": self.phone, "groups": self.groups,
-                        "custom_delay": self.custom_delay, "custom_suffix": self.custom_suffix,
-                        "selected_modes": self.selected_modes, "selected_balls": self.selected_balls,
+                        "user_id": self.user_id,
+                        "is_logged_in": self.is_logged_in,
+                        "is_active": self.is_active,
+                        "phone": self.phone,
+                        "groups": self.groups,
+                        "custom_delay": self.custom_delay,
+                        "custom_suffix": self.custom_suffix,
+                        "last_betted_issue": self.last_betted_issue,
+                        "selected_modes": self.selected_modes,
+                        "selected_balls": self.selected_balls,
                         "ball_bet_amount": self.ball_bet_amount,
                         "abc_kill_count": self.abc_kill_count,
                         "abc_martingale_multiplier": self.abc_martingale_multiplier,
@@ -169,7 +172,8 @@ class UserState:
             try:
                 self.client = TelegramClient(session_path, API_ID, API_HASH)
                 await self.client.connect()
-                if await self.client.is_user_authorized(): return True
+                if await self.client.is_user_authorized():
+                    return True
                 self.is_logged_in = False
                 self.save()
             except Exception as e:
@@ -213,7 +217,8 @@ class DataFetcher:
                     total = int(item.get("num", sum(nums)))
                     combo = item.get("combination", get_type(total))
                     parsed.append({"nums": nums, "sum": total, "type": combo, "issue": str(item.get("nbr", ""))})
-            except: pass
+            except:
+                pass
         return parsed
 
 # ==================== 5. 系统中控与自动化调度中心 ====================
@@ -225,7 +230,8 @@ class SystemOrchestrator:
         self.last_issue_id = None
 
     def get_user_state(self, uid):
-        if uid not in self.users: self.users[uid] = UserState(uid)
+        if uid not in self.users:
+            self.users[uid] = UserState(uid)
         return self.users[uid]
 
     def main_keyboard(self, u_state: UserState):
@@ -234,17 +240,18 @@ class SystemOrchestrator:
         return [
             [Button.inline(f"状态: {status}", data=b"noop"), Button.inline(login, data=b"login")],
             [Button.inline("🚀 启动挂机", data=b"start"), Button.inline("⏹ 暂停挂机", data=b"stop")],
-            [Button.inline(f"⚙️ ABC杀球设置", data=b"select_mode")],
+            [Button.inline("⚙️ ABC杀球设置", data=b"select_mode")],
             [Button.inline("📖 模式介绍与说明", data=b"mode_intro_menu")],
             [Button.inline("💎 附加特码/豹子配置", data=b"extra_config")],
-            [Button.inline("💰 独立金额与倍投设置", data=b"set_amounts_menu")],
+            [Button.inline("💰 独立金额与风控设置", data=b"set_amounts_menu")],
             [Button.inline("➕ 绑定群组", data=b"add_g"), Button.inline("➖ 移除群组", data=b"del_g"), Button.inline("📋 群组列表", data=b"list_g")],
             [Button.inline(f"⏱ 投递延迟: {u_state.custom_delay}s", data=b"set_delay"), Button.inline("📝 设置自定义尾缀", data=b"set_suffix")],
             [Button.inline("📈 实时收益战报", data=b"stats")]
         ]
 
     def mode_selection_keyboard(self, u_state: UserState):
-        def chk(m): return "✅ " if m in u_state.selected_modes else "⬜ "
+        def chk(m):
+            return "✅ " if m in u_state.selected_modes else "⬜ "
         return [
             [Button.inline(f"{chk('ball')}启用 ABC杀球模式", data=b"toggle_mode_ball")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
@@ -275,7 +282,9 @@ class SystemOrchestrator:
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
             [Button.inline(f"ABC倍投倍数: {u_state.abc_martingale_multiplier}x", data=b"set_abc_multiplier")],
             [Button.inline(f"ABC杀码数量: {u_state.abc_kill_count}个", data=b"set_abc_kill_count")],
-            [Button.inline(f"特码与豹子独立金额设置", data=b"set_extra_amounts")],
+            [Button.inline(f"每日止盈线: {u_state.risk_mgr.daily_stop_profit}", data=b"set_stop_profit")],
+            [Button.inline(f"每日止损线: {u_state.risk_mgr.daily_stop_loss}", data=b"set_stop_loss")],
+            [Button.inline("特码与豹子独立金额设置", data=b"set_extra_amounts")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
 
@@ -295,29 +304,30 @@ class SystemOrchestrator:
                     try:
                         uid = int(file.replace(".json", ""))
                         await self.get_user_state(uid).try_reconnect()
-                    except: pass
+                    except:
+                        pass
 
     async def handle_new_issue_bet(self, u: UserState, issue_id: str, latest_market_data: MarketData = None):
-        if u.last_betted_issue == issue_id: return
-        u.last_betted_issue = issue_id
+        if u.last_betted_issue == issue_id:
+            return
 
         can_bet, reason = u.risk_mgr.can_bet()
-        if not can_bet or not u.groups: return
+        if not can_bet:
+            logger.info(f"[用户 {u.user_id}] 期号 {issue_id} 被风控拦截: {reason}")
+            return
+        if not u.groups:
+            return
 
         all_bet_lines = []
         active_descriptions = []
 
-        # 重置上期杀球记录，准备生成本期
         u.last_ball_kills = {}
 
-        # ABC杀球模式（支持自定义杀码数量与倍投）
         if "ball" in u.selected_modes:
             multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
             single_bet = u.ball_bet_amount * multiplier
-            buy_count = 10 - u.abc_kill_count
 
             for b_char in u.selected_balls:
-                # 随机杀 abc_kill_count 个不同数字
                 killed_digits = random.sample(range(10), u.abc_kill_count)
                 u.last_ball_kills[b_char] = killed_digits
                 for d in range(10):
@@ -325,7 +335,6 @@ class SystemOrchestrator:
                         all_bet_lines.append(f"{b_char}{d}/{int(single_bet)}")
             active_descriptions.append(f"ABC杀球(杀{u.abc_kill_count}码,倍投{multiplier:.1f}x)")
 
-        # 附加特码与豹子下注
         if "0_27" in u.extra_special_numbers:
             amt_027 = u.extra_bet_amounts.get("0_27", 100.0)
             all_bet_lines.append(f"0/{int(amt_027)}")
@@ -338,47 +347,76 @@ class SystemOrchestrator:
             amt_bz = u.extra_bet_amounts.get("baozi", 100.0)
             all_bet_lines.append(f"豹子/{int(amt_bz)}")
 
-        if u.custom_suffix: all_bet_lines.append(u.custom_suffix)
-        if not all_bet_lines: return
+        if u.custom_suffix:
+            all_bet_lines.append(u.custom_suffix)
+        if not all_bet_lines:
+            return
 
-        bet_msg = "\n".join(all_bet_lines)
+        bet_msg = "
+".join(all_bet_lines)
 
-        if u.custom_delay > 0: await asyncio.sleep(u.custom_delay)
-        if not u.is_active or not u.client: return
+        if u.custom_delay > 0:
+            await asyncio.sleep(u.custom_delay)
+        if not u.is_active or not u.client:
+            return
 
+        sent_success = False
         for group in u.groups:
             try:
                 await u.client.send_message(group, bet_msg)
+                sent_success = True
                 logger.info(f"[用户 {u.user_id}] 成功向群组 [{group}] 发送下注 (第 {issue_id} 期)")
             except Exception as e:
                 logger.error(f"发送群组下注失败: {e}")
 
-        try:
-            mode_label = "+".join(active_descriptions)
-            await self.bot.send_message(
-                u.user_id,
-                f"【自动化下注通知】\n"
-                f"--------------------\n"
-                f"期号: `{issue_id}`\n"
-                f"启用模式: `{mode_label}`\n"
-                f"下注排版:\n`{bet_msg.replace(chr(10), ' | ')}`\n"
-                f"--------------------"
-            )
-        except: pass
+        if sent_success:
+            u.last_betted_issue = issue_id
+            u.save()
+            try:
+                mode_label = "+".join(active_descriptions)
+                await self.bot.send_message(
+                    u.user_id,
+                    f"【自动化下注通知】
+"
+                    f"--------------------
+"
+                    f"期号: `{issue_id}`
+"
+                    f"启用模式: `{mode_label}`
+"
+                    f"下注排版:
+`{bet_msg.replace(chr(10), ' | ')}`
+"
+                    f"--------------------"
+                )
+            except:
+                pass
 
     async def register_handlers(self):
         @self.bot.on(events.NewMessage(pattern="/start"))
         async def handler_start(event):
             u = self.get_user_state(event.sender_id)
+            can_bet, reason = u.risk_mgr.can_bet()
+            status_text = "运行中" if u.is_active else "已停止"
+            if not can_bet:
+                status_text += f" (风控: {reason})"
             await event.respond(
-                f"欢迎使用 PC28量子智能量化挂机系统\n"
-                f"--------------------\n"
-                f"运行状态概览:\n"
-                f"• 挂机状态: `{'运行中' if u.is_active else '已停止'}`\n"
-                f"• 绑定群组: `{len(u.groups)}` 个\n"
-                f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                f"欢迎使用 PC28量子智能量化挂机系统
+"
+                f"--------------------
+"
+                f"运行状态概览:
+"
+                f"• 挂机状态: `{status_text}`
+"
+                f"• 绑定群组: `{len(u.groups)}` 个
+"
+                f"• ABC杀码数量: `{u.abc_kill_count}` 个
+"
+                f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`
+"
+                f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`
+"
                 f"--------------------",
                 buttons=self.main_keyboard(u)
             )
@@ -389,8 +427,9 @@ class SystemOrchestrator:
             u = self.get_user_state(sid)
             data = event.data.decode() if isinstance(event.data, bytes) else event.data
 
-            if data == "noop": 
-                await event.answer(); return
+            if data == "noop":
+                await event.answer()
+                return
 
             if data == "select_mode":
                 await event.edit("请选择ABC杀球设置", buttons=self.mode_selection_keyboard(u))
@@ -398,7 +437,8 @@ class SystemOrchestrator:
 
             if data == "toggle_mode_ball":
                 if "ball" in u.selected_modes:
-                    if len(u.selected_modes) > 1: u.selected_modes.remove("ball")
+                    if len(u.selected_modes) > 1:
+                        u.selected_modes.remove("ball")
                 else:
                     u.selected_modes.append("ball")
                 u.save()
@@ -408,7 +448,8 @@ class SystemOrchestrator:
             if data.startswith("toggle_ball_"):
                 b_char = data.replace("toggle_ball_", "")
                 if b_char in u.selected_balls:
-                    if len(u.selected_balls) > 1: u.selected_balls.remove(b_char)
+                    if len(u.selected_balls) > 1:
+                        u.selected_balls.remove(b_char)
                 else:
                     u.selected_balls.append(b_char)
                 u.save()
@@ -416,7 +457,7 @@ class SystemOrchestrator:
                 return
 
             if data == "set_amounts_menu":
-                await event.edit("请选择需要修改的金额或倍投参数", buttons=self.amounts_menu_keyboard(u))
+                await event.edit("请选择需要修改的金额或风控参数", buttons=self.amounts_menu_keyboard(u))
                 return
 
             if data == "mode_intro_menu":
@@ -435,15 +476,19 @@ class SystemOrchestrator:
                 return
 
             if data == "toggle_extra_027":
-                if "0_27" in u.extra_special_numbers: u.extra_special_numbers.remove("0_27")
-                else: u.extra_special_numbers.append("0_27")
+                if "0_27" in u.extra_special_numbers:
+                    u.extra_special_numbers.remove("0_27")
+                else:
+                    u.extra_special_numbers.append("0_27")
                 u.save()
                 await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
                 return
 
             if data == "toggle_extra_126":
-                if "1_26" in u.extra_special_numbers: u.extra_special_numbers.remove("1_26")
-                else: u.extra_special_numbers.append("1_26")
+                if "1_26" in u.extra_special_numbers:
+                    u.extra_special_numbers.remove("1_26")
+                else:
+                    u.extra_special_numbers.append("1_26")
                 u.save()
                 await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
                 return
@@ -457,21 +502,34 @@ class SystemOrchestrator:
             if data == "set_extra_amounts":
                 self.user_login_states[sid] = "WAIT_EXTRA_AMOUNTS"
                 await event.respond(
-                    "请输入特码与豹子的独立下注金额格式（格式: 特码金额,豹子金额）\n"
-                    f"当前设置 -> 特码: `{u.extra_bet_amounts.get('0_27', 100)}`, 豹子: `{u.extra_bet_amounts.get('baozi', 100)}`\n"
+                    "请输入特码与豹子的独立下注金额格式（格式: 特码金额,豹子金额）
+"
+                    f"当前设置 -> 特码: `{u.extra_bet_amounts.get('0_27', 100)}`, 豹子: `{u.extra_bet_amounts.get('baozi', 100)}`
+"
                     "例如输入: `200,100`"
                 )
                 return
 
             if data == "back_main":
+                can_bet, reason = u.risk_mgr.can_bet()
+                status_text = "运行中" if u.is_active else "已停止"
+                if not can_bet:
+                    status_text += f" (风控: {reason})"
                 await event.edit(
-                    f"主控制面板\n"
-                    f"--------------------\n"
-                    f"• 挂机状态: `{'运行中' if u.is_active else '已停止'}`\n"
-                    f"• 绑定群组: `{len(u.groups)}` 个\n"
-                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                    f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                    f"主控制面板
+"
+                    f"--------------------
+"
+                    f"• 挂机状态: `{status_text}`
+"
+                    f"• 绑定群组: `{len(u.groups)}` 个
+"
+                    f"• ABC杀码数量: `{u.abc_kill_count}` 个
+"
+                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`
+"
+                    f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`
+"
                     f"--------------------",
                     buttons=self.main_keyboard(u)
                 )
@@ -479,6 +537,10 @@ class SystemOrchestrator:
             elif data == "start":
                 if not u.is_logged_in or not u.groups:
                     await event.answer("请先登录账号并绑定至少一个目标群组!", alert=True)
+                    return
+                can_bet, reason = u.risk_mgr.can_bet()
+                if not can_bet:
+                    await event.answer(f"无法启动: {reason}", alert=True)
                     return
                 u.is_active = True
                 u.save()
@@ -489,14 +551,17 @@ class SystemOrchestrator:
                 await event.edit("挂机已暂停。", buttons=self.main_keyboard(u))
             elif data == "set_delay":
                 self.user_login_states[sid] = "WAIT_DELAY"
-                await event.respond(f"当前延迟: `{u.custom_delay}s`\n请输入新投递延迟秒数:")
+                await event.respond(f"当前延迟: `{u.custom_delay}s`
+请输入新投递延迟秒数:")
             elif data == "set_suffix":
                 self.user_login_states[sid] = "WAIT_SUFFIX"
-                await event.respond(f"当前尾缀: `{u.custom_suffix}`\n请输入新的独立尾缀内容(发送 `clear` 可清空):")
+                await event.respond(f"当前尾缀: `{u.custom_suffix}`
+请输入新的独立尾缀内容(发送 `clear` 可清空):")
             elif data == "login":
                 if u.is_logged_in:
                     u.is_logged_in = u.is_active = False
-                    if u.client: await u.client.disconnect()
+                    if u.client:
+                        await u.client.disconnect()
                     u.save()
                     await event.edit("协议号已安全登出。", buttons=self.main_keyboard(u))
                 else:
@@ -506,38 +571,69 @@ class SystemOrchestrator:
                 self.user_login_states[sid] = "WAIT_GROUP"
                 await event.respond("请发送目标群组的 Username 或 ID:")
             elif data == "del_g":
-                if not u.groups: await event.respond("当前没有绑定任何群组。")
+                if not u.groups:
+                    await event.respond("当前没有绑定任何群组。")
                 else:
                     self.user_login_states[sid] = "WAIT_DEL_GROUP"
-                    await event.respond("发送对应的序号以移除群组:\n" + "\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]))
+                    await event.respond("发送对应的序号以移除群组:
+" + "
+".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]))
             elif data == "list_g":
-                await event.respond("已绑定的目标群组列表:\n" + ("\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]) if u.groups else "无"))
+                await event.respond("已绑定的目标群组列表:
+" + ("
+".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]) if u.groups else "无"))
             elif data == "set_ball_amount":
                 self.user_login_states[sid] = "WAIT_BALL_AMOUNT"
-                await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`\n请输入新金额:")
+                await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`
+请输入新金额:")
             elif data == "set_abc_multiplier":
                 self.user_login_states[sid] = "WAIT_ABC_MULTIPLIER"
-                await event.respond(f"当前ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n请输入新倍数(如 2.0 或 3.0):")
+                await event.respond(f"当前ABC倍投倍数: `{u.abc_martingale_multiplier}x`
+请输入新倍数(如 2.0 或 3.0):")
             elif data == "set_abc_kill_count":
                 self.user_login_states[sid] = "WAIT_ABC_KILL_COUNT"
-                await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个\n请输入数量(1-9):")
+                await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个
+请输入数量(1-9):")
+            elif data == "set_stop_profit":
+                self.user_login_states[sid] = "WAIT_STOP_PROFIT"
+                await event.respond(f"当前每日止盈线: `{u.risk_mgr.daily_stop_profit}`
+请输入新金额(输入 0 为不限制):")
+            elif data == "set_stop_loss":
+                self.user_login_states[sid] = "WAIT_STOP_LOSS"
+                await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`
+请输入新金额(输入 0 为不限制):")
             elif data == "stats":
                 rm = u.risk_mgr
                 current_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+                can_bet, reason = rm.can_bet()
                 await event.respond(
-                    f"详细收益战报与风控统计\n"
-                    f"--------------------\n"
-                    f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
-                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                    f"• ABC当前连败: `{u.abc_consecutive_losses}` 次\n"
-                    f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`\n"
+                    f"详细收益战报与风控统计
+"
+                    f"--------------------
+"
+                    f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`
+"
+                    f"• ABC杀码数量: `{u.abc_kill_count}` 个
+"
+                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`
+"
+                    f"• ABC当前连败: `{u.abc_consecutive_losses}` 次
+"
+                    f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`
+"
+                    f"• 每日止盈线: `{rm.daily_stop_profit}`
+"
+                    f"• 每日止损线: `{rm.daily_stop_loss}`
+"
+                    f"• 风控状态: `{'正常' if can_bet else reason}`
+"
                     f"--------------------"
                 )
 
         @self.bot.on(events.NewMessage)
         async def handler_text(event):
-            if event.text.startswith("/"): return
+            if event.text.startswith("/"):
+                return
             sid = event.sender_id
             state = self.user_login_states.get(sid)
             u = self.get_user_state(sid)
@@ -582,13 +678,15 @@ class SystemOrchestrator:
                     await event.respond(f"密码错误: {e}")
             elif state == "WAIT_GROUP":
                 grp = event.text.strip()
-                if grp not in u.groups: u.groups.append(grp); u.save()
+                if grp not in u.groups:
+                    u.groups.append(grp)
+                    u.save()
                 await event.respond(f"成功绑定群组: `{grp}`", buttons=self.main_keyboard(u))
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_DEL_GROUP":
                 val = event.text.strip()
-                if val.isdigit() and 0 <= int(val)-1 < len(u.groups):
-                    rmv = u.groups.pop(int(val)-1)
+                if val.isdigit() and 0 <= int(val) - 1 < len(u.groups):
+                    rmv = u.groups.pop(int(val) - 1)
                     u.save()
                     await event.respond(f"已成功移除群组: `{rmv}`", buttons=self.main_keyboard(u))
                 self.user_login_states.pop(sid, None)
@@ -597,7 +695,8 @@ class SystemOrchestrator:
                     u.custom_delay = max(0.0, float(event.text.strip()))
                     u.save()
                     await event.respond(f"投递延迟更新为: `{u.custom_delay}s`", buttons=self.main_keyboard(u))
-                except: await event.respond("请输入有效的秒数数字")
+                except:
+                    await event.respond("请输入有效的秒数数字")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_SUFFIX":
                 txt = event.text.strip()
@@ -610,7 +709,8 @@ class SystemOrchestrator:
                     u.ball_bet_amount = max(1.0, float(event.text.strip()))
                     u.save()
                     await event.respond("ABC杀球单注金额更新成功", buttons=self.main_keyboard(u))
-                except: await event.respond("请输入有效数字")
+                except:
+                    await event.respond("请输入有效数字")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_ABC_MULTIPLIER":
                 try:
@@ -618,7 +718,8 @@ class SystemOrchestrator:
                     u.abc_martingale_multiplier = max(1.0, val)
                     u.save()
                     await event.respond(f"ABC倍投倍数更新为: `{u.abc_martingale_multiplier}x`", buttons=self.main_keyboard(u))
-                except: await event.respond("请输入有效数字")
+                except:
+                    await event.respond("请输入有效数字")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_ABC_KILL_COUNT":
                 try:
@@ -626,7 +727,26 @@ class SystemOrchestrator:
                     u.abc_kill_count = max(1, min(9, val))
                     u.save()
                     await event.respond(f"ABC杀码数量更新为: `{u.abc_kill_count}`个", buttons=self.main_keyboard(u))
-                except: await event.respond("请输入1-9之间的整数")
+                except:
+                    await event.respond("请输入1-9之间的整数")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_STOP_PROFIT":
+                try:
+                    val = float(event.text.strip())
+                    u.risk_mgr.daily_stop_profit = max(0.0, val)
+                    u.save()
+                    await event.respond(f"每日止盈线更新为: `{u.risk_mgr.daily_stop_profit}`", buttons=self.main_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_STOP_LOSS":
+                try:
+                    val = float(event.text.strip())
+                    u.risk_mgr.daily_stop_loss = max(0.0, val)
+                    u.save()
+                    await event.respond(f"每日止损线更新为: `{u.risk_mgr.daily_stop_loss}`", buttons=self.main_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_EXTRA_AMOUNTS":
                 try:
@@ -692,20 +812,27 @@ class SystemOrchestrator:
                                 u.last_ball_kills = {}
 
                             u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
-                            if len(u.history) > 120: u.history = u.history[:120]
+                            if len(u.history) > 120:
+                                u.history = u.history[:120]
                             u.save()
 
                             try:
                                 await self.bot.send_message(
                                     u.user_id,
-                                    f"【开奖结果通知】\n"
-                                    f"--------------------\n"
-                                    f"期号: `{data.issue_id}`\n"
-                                    f"开奖: `{data.number_str}` (和值: `{data.num_value}` -> `{data.combination}`)\n"
-                                    f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                                    f"【开奖结果通知】
+"
+                                    f"--------------------
+"
+                                    f"期号: `{data.issue_id}`
+"
+                                    f"开奖: `{data.number_str}` (和值: `{data.num_value}` -> `{data.combination}`)
+"
+                                    f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`
+"
                                     f"--------------------"
                                 )
-                            except: pass
+                            except:
+                                pass
 
                             if u.is_active:
                                 asyncio.create_task(self.handle_new_issue_bet(u, data.issue_id, data))
@@ -727,8 +854,10 @@ def start_bot_thread():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     orchestrator = SystemOrchestrator()
-    try: loop.run_until_complete(orchestrator.start())
-    except Exception as e: logger.error(f"Bot 运行异常: {e}")
+    try:
+        loop.run_until_complete(orchestrator.start())
+    except Exception as e:
+        logger.error(f"Bot 运行异常: {e}")
 
 threading.Thread(target=start_bot_thread, daemon=True).start()
 
