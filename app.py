@@ -43,11 +43,18 @@ class RiskManager:
         self.daily_stop_profit = daily_stop_profit
         self.daily_pnl = 0.0
 
-    def can_bet(self) -> tuple[bool, str]:
+    def check_triggered(self) -> tuple[bool, str]:
+        """检查是否已触发止盈或止损，返回 (是否触发, 原因)"""
         if self.daily_stop_loss > 0 and self.daily_pnl <= -self.daily_stop_loss:
-            return False, f"已触及每日止损线 ({self.daily_stop_loss})"
+            return True, f"已触及每日止损线 ({self.daily_stop_loss})"
         if self.daily_stop_profit > 0 and self.daily_pnl >= self.daily_stop_profit:
-            return False, f"已触及每日止盈线 ({self.daily_stop_profit})"
+            return True, f"已触及每日止盈线 ({self.daily_stop_profit})"
+        return False, ""
+
+    def can_bet(self) -> tuple[bool, str]:
+        triggered, reason = self.check_triggered()
+        if triggered:
+            return False, reason
         return True, "运行正常"
 
     def add_pnl(self, amount: float):
@@ -278,12 +285,15 @@ class SystemOrchestrator:
 
     def amounts_menu_keyboard(self, u_state: UserState):
         current_multiplier = u_state.abc_martingale_multiplier ** u_state.abc_consecutive_losses
+        triggered, reason = u_state.risk_mgr.check_triggered()
+        risk_status = f"🔴 {reason}" if triggered else "🟢 正常"
         return [
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
             [Button.inline(f"ABC倍投倍数: {u_state.abc_martingale_multiplier}x", data=b"set_abc_multiplier")],
             [Button.inline(f"ABC杀码数量: {u_state.abc_kill_count}个", data=b"set_abc_kill_count")],
             [Button.inline(f"每日止盈线: {u_state.risk_mgr.daily_stop_profit}", data=b"set_stop_profit")],
             [Button.inline(f"每日止损线: {u_state.risk_mgr.daily_stop_loss}", data=b"set_stop_loss")],
+            [Button.inline(f"风控状态: {risk_status}", data=b"noop")],
             [Button.inline("特码与豹子独立金额设置", data=b"set_extra_amounts")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
@@ -352,8 +362,7 @@ class SystemOrchestrator:
         if not all_bet_lines:
             return
 
-        bet_msg = "
-".join(all_bet_lines)
+        bet_msg = "\n".join(all_bet_lines)
 
         if u.custom_delay > 0:
             await asyncio.sleep(u.custom_delay)
@@ -376,17 +385,11 @@ class SystemOrchestrator:
                 mode_label = "+".join(active_descriptions)
                 await self.bot.send_message(
                     u.user_id,
-                    f"【自动化下注通知】
-"
-                    f"--------------------
-"
-                    f"期号: `{issue_id}`
-"
-                    f"启用模式: `{mode_label}`
-"
-                    f"下注排版:
-`{bet_msg.replace(chr(10), ' | ')}`
-"
+                    f"【自动化下注通知】\n"
+                    f"--------------------\n"
+                    f"期号: `{issue_id}`\n"
+                    f"启用模式: `{mode_label}`\n"
+                    f"下注排版:\n`{bet_msg.replace(chr(10), ' | ')}`\n"
                     f"--------------------"
                 )
             except:
@@ -401,22 +404,14 @@ class SystemOrchestrator:
             if not can_bet:
                 status_text += f" (风控: {reason})"
             await event.respond(
-                f"欢迎使用 PC28量子智能量化挂机系统
-"
-                f"--------------------
-"
-                f"运行状态概览:
-"
-                f"• 挂机状态: `{status_text}`
-"
-                f"• 绑定群组: `{len(u.groups)}` 个
-"
-                f"• ABC杀码数量: `{u.abc_kill_count}` 个
-"
-                f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`
-"
-                f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`
-"
+                f"欢迎使用 PC28量子智能量化挂机系统\n"
+                f"--------------------\n"
+                f"运行状态概览:\n"
+                f"• 挂机状态: `{status_text}`\n"
+                f"• 绑定群组: `{len(u.groups)}` 个\n"
+                f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
+                f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                 f"--------------------",
                 buttons=self.main_keyboard(u)
             )
@@ -502,10 +497,8 @@ class SystemOrchestrator:
             if data == "set_extra_amounts":
                 self.user_login_states[sid] = "WAIT_EXTRA_AMOUNTS"
                 await event.respond(
-                    "请输入特码与豹子的独立下注金额格式（格式: 特码金额,豹子金额）
-"
-                    f"当前设置 -> 特码: `{u.extra_bet_amounts.get('0_27', 100)}`, 豹子: `{u.extra_bet_amounts.get('baozi', 100)}`
-"
+                    "请输入特码与豹子的独立下注金额格式（格式: 特码金额,豹子金额）\n"
+                    f"当前设置 -> 特码: `{u.extra_bet_amounts.get('0_27', 100)}`, 豹子: `{u.extra_bet_amounts.get('baozi', 100)}`\n"
                     "例如输入: `200,100`"
                 )
                 return
@@ -516,20 +509,13 @@ class SystemOrchestrator:
                 if not can_bet:
                     status_text += f" (风控: {reason})"
                 await event.edit(
-                    f"主控制面板
-"
-                    f"--------------------
-"
-                    f"• 挂机状态: `{status_text}`
-"
-                    f"• 绑定群组: `{len(u.groups)}` 个
-"
-                    f"• ABC杀码数量: `{u.abc_kill_count}` 个
-"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`
-"
-                    f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`
-"
+                    f"主控制面板\n"
+                    f"--------------------\n"
+                    f"• 挂机状态: `{status_text}`\n"
+                    f"• 绑定群组: `{len(u.groups)}` 个\n"
+                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
+                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                     f"--------------------",
                     buttons=self.main_keyboard(u)
                 )
@@ -540,7 +526,7 @@ class SystemOrchestrator:
                     return
                 can_bet, reason = u.risk_mgr.can_bet()
                 if not can_bet:
-                    await event.answer(f"无法启动: {reason}", alert=True)
+                    await event.answer(f"无法启动: {reason}，请修改止盈/止损线后重试", alert=True)
                     return
                 u.is_active = True
                 u.save()
@@ -551,12 +537,10 @@ class SystemOrchestrator:
                 await event.edit("挂机已暂停。", buttons=self.main_keyboard(u))
             elif data == "set_delay":
                 self.user_login_states[sid] = "WAIT_DELAY"
-                await event.respond(f"当前延迟: `{u.custom_delay}s`
-请输入新投递延迟秒数:")
+                await event.respond(f"当前延迟: `{u.custom_delay}s`\n请输入新投递延迟秒数:")
             elif data == "set_suffix":
                 self.user_login_states[sid] = "WAIT_SUFFIX"
-                await event.respond(f"当前尾缀: `{u.custom_suffix}`
-请输入新的独立尾缀内容(发送 `clear` 可清空):")
+                await event.respond(f"当前尾缀: `{u.custom_suffix}`\n请输入新的独立尾缀内容(发送 `clear` 可清空):")
             elif data == "login":
                 if u.is_logged_in:
                     u.is_logged_in = u.is_active = False
@@ -575,58 +559,40 @@ class SystemOrchestrator:
                     await event.respond("当前没有绑定任何群组。")
                 else:
                     self.user_login_states[sid] = "WAIT_DEL_GROUP"
-                    await event.respond("发送对应的序号以移除群组:
-" + "
-".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]))
+                    await event.respond("发送对应的序号以移除群组:\n" + "\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]))
             elif data == "list_g":
-                await event.respond("已绑定的目标群组列表:
-" + ("
-".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]) if u.groups else "无"))
+                await event.respond("已绑定的目标群组列表:\n" + ("\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]) if u.groups else "无"))
             elif data == "set_ball_amount":
                 self.user_login_states[sid] = "WAIT_BALL_AMOUNT"
-                await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`
-请输入新金额:")
+                await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`\n请输入新金额:")
             elif data == "set_abc_multiplier":
                 self.user_login_states[sid] = "WAIT_ABC_MULTIPLIER"
-                await event.respond(f"当前ABC倍投倍数: `{u.abc_martingale_multiplier}x`
-请输入新倍数(如 2.0 或 3.0):")
+                await event.respond(f"当前ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n请输入新倍数(如 2.0 或 3.0):")
             elif data == "set_abc_kill_count":
                 self.user_login_states[sid] = "WAIT_ABC_KILL_COUNT"
-                await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个
-请输入数量(1-9):")
+                await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个\n请输入数量(1-9):")
             elif data == "set_stop_profit":
                 self.user_login_states[sid] = "WAIT_STOP_PROFIT"
-                await event.respond(f"当前每日止盈线: `{u.risk_mgr.daily_stop_profit}`
-请输入新金额(输入 0 为不限制):")
+                await event.respond(f"当前每日止盈线: `{u.risk_mgr.daily_stop_profit}`\n请输入新金额(输入 0 为不限制):")
             elif data == "set_stop_loss":
                 self.user_login_states[sid] = "WAIT_STOP_LOSS"
-                await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`
-请输入新金额(输入 0 为不限制):")
+                await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`\n请输入新金额(输入 0 为不限制):")
             elif data == "stats":
                 rm = u.risk_mgr
                 current_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
                 can_bet, reason = rm.can_bet()
+                triggered, trigger_reason = rm.check_triggered()
                 await event.respond(
-                    f"详细收益战报与风控统计
-"
-                    f"--------------------
-"
-                    f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`
-"
-                    f"• ABC杀码数量: `{u.abc_kill_count}` 个
-"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`
-"
-                    f"• ABC当前连败: `{u.abc_consecutive_losses}` 次
-"
-                    f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`
-"
-                    f"• 每日止盈线: `{rm.daily_stop_profit}`
-"
-                    f"• 每日止损线: `{rm.daily_stop_loss}`
-"
-                    f"• 风控状态: `{'正常' if can_bet else reason}`
-"
+                    f"详细收益战报与风控统计\n"
+                    f"--------------------\n"
+                    f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
+                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
+                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• ABC当前连败: `{u.abc_consecutive_losses}` 次\n"
+                    f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`\n"
+                    f"• 每日止盈线: `{rm.daily_stop_profit}`\n"
+                    f"• 每日止损线: `{rm.daily_stop_loss}`\n"
+                    f"• 风控状态: `{'🔴 已触发: ' + trigger_reason if triggered else '🟢 正常'}`\n"
                     f"--------------------"
                 )
 
@@ -816,19 +782,34 @@ class SystemOrchestrator:
                                 u.history = u.history[:120]
                             u.save()
 
+                            # 结算后检查是否触发止盈/止损，触发则自动暂停挂机
+                            triggered, trigger_reason = u.risk_mgr.check_triggered()
+                            if triggered and u.is_active:
+                                u.is_active = False
+                                u.save()
+                                logger.warning(f"[用户 {uid}] 触发风控自动暂停: {trigger_reason}, 盈亏={u.risk_mgr.daily_pnl:+.2f}")
+                                try:
+                                    await self.bot.send_message(
+                                        u.user_id,
+                                        f"【🚨 风控自动暂停通知】\n"
+                                        f"--------------------\n"
+                                        f"期号: `{data.issue_id}`\n"
+                                        f"触发原因: `{trigger_reason}`\n"
+                                        f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                                        f"--------------------\n"
+                                        f"挂机已自动暂停，如需继续请手动点击 🚀 启动挂机"
+                                    )
+                                except:
+                                    pass
+
                             try:
                                 await self.bot.send_message(
                                     u.user_id,
-                                    f"【开奖结果通知】
-"
-                                    f"--------------------
-"
-                                    f"期号: `{data.issue_id}`
-"
-                                    f"开奖: `{data.number_str}` (和值: `{data.num_value}` -> `{data.combination}`)
-"
-                                    f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`
-"
+                                    f"【开奖结果通知】\n"
+                                    f"--------------------\n"
+                                    f"期号: `{data.issue_id}`\n"
+                                    f"开奖: `{data.number_str}` (和值: `{data.num_value}` -> `{data.combination}`)\n"
+                                    f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                                     f"--------------------"
                                 )
                             except:
@@ -863,7 +844,7 @@ threading.Thread(target=start_bot_thread, daemon=True).start()
 
 with gr.Blocks(title="PC28量化智能挂机系统", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已移除杀组与中边玩法，删除熔断机制。ABC杀球模式支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。保留特码与豹子附加下注。")
+    gr.Markdown("已移除杀组与中边玩法。ABC杀球模式支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
 
