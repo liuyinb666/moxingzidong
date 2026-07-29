@@ -97,6 +97,11 @@ class UserState:
         self.selected_modes = ["ball"]
         self.selected_balls = ["a"] 
 
+        # 随机杀球模式：每期从a/b/c中随机选1个球杀码
+        self.abc_random_ball_mode = False
+        # 记录上期实际随机选中的球（用于结算）
+        self.last_random_balls = []
+
         self.ball_bet_amount = 100.0
         self.abc_kill_count = 1
         self.abc_martingale_multiplier = 2.0
@@ -132,6 +137,8 @@ class UserState:
                         if not self.selected_modes:
                             self.selected_modes = ["ball"]
                         self.selected_balls = data.get("selected_balls", ["a"])
+                        self.abc_random_ball_mode = data.get("abc_random_ball_mode", False)
+                        self.last_random_balls = data.get("last_random_balls", [])
                         self.ball_bet_amount = data.get("ball_bet_amount", 100.0)
                         self.abc_kill_count = data.get("abc_kill_count", 1)
                         self.abc_martingale_multiplier = data.get("abc_martingale_multiplier", 2.0)
@@ -160,6 +167,8 @@ class UserState:
                         "last_betted_issue": self.last_betted_issue,
                         "selected_modes": self.selected_modes,
                         "selected_balls": self.selected_balls,
+                        "abc_random_ball_mode": self.abc_random_ball_mode,
+                        "last_random_balls": self.last_random_balls,
                         "ball_bet_amount": self.ball_bet_amount,
                         "abc_kill_count": self.abc_kill_count,
                         "abc_martingale_multiplier": self.abc_martingale_multiplier,
@@ -259,14 +268,17 @@ class SystemOrchestrator:
     def mode_selection_keyboard(self, u_state: UserState):
         def chk(m):
             return "✅ " if m in u_state.selected_modes else "⬜ "
+        rb_status = "🎲 已开启" if u_state.abc_random_ball_mode else "🎲 已关闭"
         return [
             [Button.inline(f"{chk('ball')}启用 ABC杀球模式", data=b"toggle_mode_ball")],
+            [Button.inline(f"{rb_status} 随机杀球模式", data=b"toggle_random_ball")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
 
     def mode_intro_keyboard(self):
         return [
             [Button.inline("ABC球模式介绍", data=b"intro_ball")],
+            [Button.inline("随机杀球模式介绍", data=b"intro_random_ball")],
             [Button.inline("特码与豹子介绍", data=b"intro_extra")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
@@ -287,6 +299,7 @@ class SystemOrchestrator:
         current_multiplier = u_state.abc_martingale_multiplier ** u_state.abc_consecutive_losses
         triggered, reason = u_state.risk_mgr.check_triggered()
         risk_status = f"🔴 {reason}" if triggered else "🟢 正常"
+        rb_text = "🎲 随机杀球: 开启" if u_state.abc_random_ball_mode else "🎯 固定杀球: " + ",".join(u_state.selected_balls).upper()
         return [
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
             [Button.inline(f"ABC倍投倍数: {u_state.abc_martingale_multiplier}x", data=b"set_abc_multiplier")],
@@ -294,6 +307,7 @@ class SystemOrchestrator:
             [Button.inline(f"每日止盈线: {u_state.risk_mgr.daily_stop_profit}", data=b"set_stop_profit")],
             [Button.inline(f"每日止损线: {u_state.risk_mgr.daily_stop_loss}", data=b"set_stop_loss")],
             [Button.inline(f"风控状态: {risk_status}", data=b"noop")],
+            [Button.inline(rb_text, data=b"noop")],
             [Button.inline("特码与豹子独立金额设置", data=b"set_extra_amounts")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
@@ -304,7 +318,7 @@ class SystemOrchestrator:
             return Button.inline(f"{checked}{name}", data=f"toggle_ball_{b_char}")
         return [
             [mk_btn("a", "A球（第1位）"), mk_btn("b", "B球（第2位）"), mk_btn("c", "C球（第3位）")],
-            [Button.inline("💾 保存并返回主菜单", data=b"back_main")]
+            [Button.inline("💾 保存并返回设置", data=b"select_mode")]
         ]
 
     async def load_existing_users(self):
@@ -332,18 +346,33 @@ class SystemOrchestrator:
         active_descriptions = []
 
         u.last_ball_kills = {}
+        u.last_random_balls = []
+
+        # 确定本期要杀的球
+        if u.abc_random_ball_mode:
+            # 随机杀球模式：每期从 a/b/c 中随机选1个球
+            current_balls = [random.choice(["a", "b", "c"])]
+            u.last_random_balls = current_balls
+        else:
+            # 固定杀球模式：使用用户手动选择的球
+            current_balls = u.selected_balls
 
         if "ball" in u.selected_modes:
             multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
             single_bet = u.ball_bet_amount * multiplier
 
-            for b_char in u.selected_balls:
+            for b_char in current_balls:
                 killed_digits = random.sample(range(10), u.abc_kill_count)
                 u.last_ball_kills[b_char] = killed_digits
                 for d in range(10):
                     if d not in killed_digits:
                         all_bet_lines.append(f"{b_char}{d}/{int(single_bet)}")
-            active_descriptions.append(f"ABC杀球(杀{u.abc_kill_count}码,倍投{multiplier:.1f}x)")
+
+            ball_desc = ",".join([b.upper() for b in current_balls])
+            if u.abc_random_ball_mode:
+                active_descriptions.append(f"ABC随机杀球[{ball_desc}](杀{u.abc_kill_count}码,倍投{multiplier:.1f}x)")
+            else:
+                active_descriptions.append(f"ABC杀球({ball_desc},杀{u.abc_kill_count}码,倍投{multiplier:.1f}x)")
 
         if "0_27" in u.extra_special_numbers:
             amt_027 = u.extra_bet_amounts.get("0_27", 100.0)
@@ -403,12 +432,13 @@ class SystemOrchestrator:
             status_text = "运行中" if u.is_active else "已停止"
             if not can_bet:
                 status_text += f" (风控: {reason})"
+            rb_text = "🎲 随机杀球" if u.abc_random_ball_mode else f"🎯 固定杀球({','.join(u.selected_balls).upper()})"
             await event.respond(
                 f"欢迎使用 PC28量子智能量化挂机系统\n"
                 f"--------------------\n"
                 f"运行状态概览:\n"
                 f"• 挂机状态: `{status_text}`\n"
-                f"• 绑定群组: `{len(u.groups)}` 个\n"
+                f"• ABC模式: `{rb_text}`\n"
                 f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                 f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
                 f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
@@ -437,7 +467,13 @@ class SystemOrchestrator:
                 else:
                     u.selected_modes.append("ball")
                 u.save()
-                await event.edit("请选择需要参与杀球的位次（可多选）", buttons=self.ball_selection_keyboard(u.selected_balls))
+                await event.edit("请选择ABC杀球设置", buttons=self.mode_selection_keyboard(u))
+                return
+
+            if data == "toggle_random_ball":
+                u.abc_random_ball_mode = not u.abc_random_ball_mode
+                u.save()
+                await event.edit("请选择ABC杀球设置", buttons=self.mode_selection_keyboard(u))
                 return
 
             if data.startswith("toggle_ball_"):
@@ -461,6 +497,9 @@ class SystemOrchestrator:
 
             if data == "intro_ball":
                 await event.answer("ABC球模式：针对开奖号码的前三位进行定位杀号。用户可多选A、B、C球，自定义杀码数量后系统自动随机杀掉对应数量的数字，并按独立金额与倍投设置自动投递剩余数字。中奖倍率9.99。", alert=True)
+                return
+            if data == "intro_random_ball":
+                await event.answer("随机杀球模式：开启后每期自动从A、B、C三个球中随机选择1个球进行杀码投注，无需手动选择球位。关闭后恢复手动选择模式。", alert=True)
                 return
             if data == "intro_extra":
                 await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0/27、1/26）以及豹子。", alert=True)
@@ -508,11 +547,12 @@ class SystemOrchestrator:
                 status_text = "运行中" if u.is_active else "已停止"
                 if not can_bet:
                     status_text += f" (风控: {reason})"
+                rb_text = "🎲 随机杀球" if u.abc_random_ball_mode else f"🎯 固定杀球({','.join(u.selected_balls).upper()})"
                 await event.edit(
                     f"主控制面板\n"
                     f"--------------------\n"
                     f"• 挂机状态: `{status_text}`\n"
-                    f"• 绑定群组: `{len(u.groups)}` 个\n"
+                    f"• ABC模式: `{rb_text}`\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                     f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
                     f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
@@ -582,9 +622,13 @@ class SystemOrchestrator:
                 current_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
                 can_bet, reason = rm.can_bet()
                 triggered, trigger_reason = rm.check_triggered()
+                rb_text = "🎲 随机杀球" if u.abc_random_ball_mode else f"🎯 固定杀球({','.join(u.selected_balls).upper()})"
+                last_rb = f"上期随机球: {','.join(u.last_random_balls).upper()}" if u.abc_random_ball_mode and u.last_random_balls else ""
                 await event.respond(
                     f"详细收益战报与风控统计\n"
                     f"--------------------\n"
+                    f"• ABC模式: `{rb_text}`\n"
+                    f"{last_rb + chr(10) if last_rb else ''}"
                     f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                     f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
@@ -745,7 +789,10 @@ class SystemOrchestrator:
                                 total_abc_pnl = 0.0
                                 has_any_bet = False
 
-                                for b_char in u.selected_balls:
+                                # 结算时使用实际上期投注的球（随机模式用 last_random_balls，固定模式用 selected_balls）
+                                settle_balls = u.last_random_balls if u.abc_random_ball_mode else u.selected_balls
+
+                                for b_char in settle_balls:
                                     if b_char in u.last_ball_kills and b_char in ball_index_map:
                                         killed_list = u.last_ball_kills[b_char]
                                         idx = ball_index_map[b_char]
@@ -776,6 +823,7 @@ class SystemOrchestrator:
                                         logger.info(f"[用户 {uid}] ABC球本期整体亏损 {total_abc_pnl:.2f}，连败+1: {u.abc_consecutive_losses}")
 
                                 u.last_ball_kills = {}
+                                u.last_random_balls = []
 
                             u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
                             if len(u.history) > 120:
@@ -844,7 +892,7 @@ threading.Thread(target=start_bot_thread, daemon=True).start()
 
 with gr.Blocks(title="PC28量化智能挂机系统", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已移除杀组与中边玩法。ABC杀球模式支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
+    gr.Markdown("已移除杀组与中边玩法。ABC杀球模式支持固定/随机杀球切换、自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
 
