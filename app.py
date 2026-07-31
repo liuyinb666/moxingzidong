@@ -1423,6 +1423,8 @@ class SystemOrchestrator:
             u.broadcast_history = u.broadcast_history[-20:]  # 保留最近20条
 
             msg = build_broadcast_message(u.broadcast_title, u.broadcast_history)
+            if u.custom_delay > 0:
+                await asyncio.sleep(u.custom_delay)
             await u.client.send_message(u.broadcast_channel, msg)
             u.broadcast_count += 1
             u.broadcast_sent_issues.append(data.issue_id)
