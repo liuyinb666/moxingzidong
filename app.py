@@ -10,7 +10,8 @@ import random
 from collections import defaultdict, Counter
 from dataclasses import dataclass
 from datetime import datetime, date, timezone, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+from enum import Enum
 import aiohttp
 import gradio as gr
 from telethon import TelegramClient, events, Button
@@ -41,900 +42,633 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================== 内置 30 算法矩阵 ====================
+# ==================== 内置 4 算法动态选择矩阵 ====================
 
-class BasePredictor:
-    """所有预测算法的基类"""
-    name = "base"
-    version = "1.0"
+class Group(Enum):
+    SMALL_ODD = "小单"
+    SMALL_EVEN = "小双"
+    BIG_ODD = "大单"
+    BIG_EVEN = "大双"
 
-    def predict(self, history: list) -> dict:
-        """
-        输入: history 为列表，元素是 dict，至少包含:
-            {"size": "大"/"小", "odd_even": "单"/"双", "dragon_tiger": "龙"/"虎"/"和",
-             "total": int, "nums": [int,int,int], "issue": str}
-        返回: {"大单": score, "大双": score, "小单": score, "小双": score}
-        """
-        raise NotImplementedError
+OPPOSITE_GROUP = {
+    Group.SMALL_ODD: Group.BIG_EVEN,
+    Group.BIG_EVEN: Group.SMALL_ODD,
+    Group.SMALL_EVEN: Group.BIG_ODD,
+    Group.BIG_ODD: Group.SMALL_EVEN,
+}
 
-    def update(self, actual: dict):
-        """反馈: actual 格式同 history 元素"""
-        pass
+TYPICAL_CODES = {
+    Group.SMALL_ODD: [5, 7, 9, 11, 3, 1, 13],
+    Group.SMALL_EVEN: [4, 6, 8, 10, 2, 0, 12],
+    Group.BIG_ODD: [15, 17, 19, 21, 23, 25, 27],
+    Group.BIG_EVEN: [16, 18, 20, 22, 14, 24, 26],
+}
 
-    def _base_scores(self, value=50):
-        return {"大单": value, "大双": value, "小单": value, "小双": value}
+class Draw:
+    def __init__(self, period: str, hundreds: int, tens: int, ones: int):
+        self.period = period
+        self.hundreds = hundreds
+        self.tens = tens
+        self.ones = ones
 
-    def _combo(self, size, odd):
-        return f"{size}{odd}"
+    @property
+    def sum_value(self) -> int:
+        return self.hundreds + self.tens + self.ones
 
+    @property
+    def seven_y(self) -> int:
+        return self.sum_value % 7
 
-class Markov3Predictor(BasePredictor):
-    """三阶马尔可夫链 - 状态转移记忆"""
-    name = "markov_3rd"
-    def predict(self, history):
-        if len(history) < 4:
-            return self._base_scores()
-        h = history[-3:]
-        key = tuple(r["size"]+r["odd_even"] for r in h)
-        model = defaultdict(Counter)
-        for i in range(len(history)-3):
-            k = tuple(history[j]["size"]+history[j]["odd_even"] for j in range(i,i+3))
-            nxt = history[i+3]["size"]+history[i+3]["odd_even"]
-            model[k][nxt] += 1
-        if not model[key]:
-            return self._base_scores()
-        total = sum(model[key].values())
-        scores = self._base_scores(50)
-        for combo, cnt in model[key].items():
-            if combo in scores:
-                scores[combo] += (cnt/total)*40
-        return scores
-
-
-class Markov4Predictor(BasePredictor):
-    """四阶马尔可夫链 - 深层状态记忆"""
-    name = "markov_4th"
-    def predict(self, history):
-        if len(history) < 5:
-            return self._base_scores()
-        key = tuple(r["size"]+r["odd_even"] for r in history[-4:])
-        model = defaultdict(Counter)
-        for i in range(len(history)-4):
-            k = tuple(history[j]["size"]+history[j]["odd_even"] for j in range(i,i+4))
-            nxt = history[i+4]["size"]+history[i+4]["odd_even"]
-            model[k][nxt] += 1
-        if not model[key]:
-            return self._base_scores()
-        total = sum(model[key].values())
-        scores = self._base_scores(50)
-        for combo, cnt in model[key].items():
-            if combo in scores:
-                scores[combo] += (cnt/total)*40
-        return scores
-
-
-class EWMAMultiPredictor(BasePredictor):
-    """EWMA多尺度融合 - 指数加权记忆"""
-    name = "ewma_multi"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        scales = [3, 8, 21]
-        weights = [0.5, 0.3, 0.2]
-        scores = self._base_scores(0)
-        for w, span in zip(weights, scales):
-            alpha = 2/(span+1)
-            sz_w = {"大": 0, "小": 0}
-            od_w = {"单": 0, "双": 0}
-            for r in history[-span*2:]:
-                sz_w[r["size"]] = sz_w[r["size"]]*(1-alpha) + alpha
-                od_w[r["odd_even"]] = od_w[r["odd_even"]]*(1-alpha) + alpha
-            for combo in scores:
-                scores[combo] += sz_w[combo[0]]*od_w[combo[1]]*w*100
-        return scores
-
-
-class HoltWintersPredictor(BasePredictor):
-    """Holt-Winters三重平滑 - 趋势+季节"""
-    name = "holt_winters"
-    def predict(self, history):
-        if len(history) < 8:
-            return self._base_scores()
-        sz = [1 if r["size"]=="大" else -1 for r in history[-20:]]
-        od = [1 if r["odd_even"]=="单" else -1 for r in history[-20:]]
-        a1, b1 = self._hw(sz)
-        a2, b2 = self._hw(od)
-        scores = self._base_scores(50)
-        if a1+b1 > 0:
-            scores["大单"]+=20; scores["大双"]+=20
+    @property
+    def group(self) -> Group:
+        s = self.sum_value
+        if s <= 13:
+            return Group.SMALL_ODD if s % 2 == 1 else Group.SMALL_EVEN
         else:
-            scores["小单"]+=20; scores["小双"]+=20
-        if a2+b2 > 0:
-            scores["大单"]+=20; scores["小单"]+=20
+            return Group.BIG_ODD if s % 2 == 1 else Group.BIG_EVEN
+
+    def __str__(self):
+        return f"{self.hundreds}+{self.tens}+{self.ones}"
+
+
+def compute_xiaofeng_algorithm(data, index):
+    if index >= len(data) or len(data) < 3:
+        return None
+
+    draws = []
+    for item in data:
+        nums = item['nums']
+        draws.append(Draw(
+            period=str(item['issue']),
+            hundreds=nums[0],
+            tens=nums[1],
+            ones=nums[2]
+        ))
+
+    if len(draws) < 3:
+        return None
+
+    current = draws[index] if index < len(draws) else draws[0]
+    seven_y = current.seven_y
+
+    refs = []
+    for i, d in enumerate(draws[index+1:], index+1):
+        if d.seven_y == seven_y:
+            refs.append((d, i - index))
+            if len(refs) >= 5:
+                break
+
+    votes: Dict[Group, int] = {}
+    DIGIT_MAP = {
+        0: ("十位", lambda d: [d.tens]),
+        1: ("个位", lambda d: [d.ones]),
+        2: ("百位", lambda d: [d.hundreds]),
+        3: ("百位+十位", lambda d: [d.hundreds, d.tens]),
+        4: ("个位", lambda d: [d.ones]),
+        5: ("十位", lambda d: [d.tens]),
+        6: ("百位", lambda d: [d.hundreds]),
+    }
+    POS_ATTR = {2: "hundreds", 6: "hundreds", 0: "tens", 5: "tens", 1: "ones", 4: "ones"}
+
+    for ref, distance in refs:
+        _, get_digits = DIGIT_MAP[seven_y]
+        taken = get_digits(ref)
+
+        if seven_y == 3:
+            new_digit = (current.hundreds + current.tens + sum(taken)) % 10
+            new_draw = Draw("新", new_digit, new_digit, current.ones)
         else:
-            scores["大双"]+=20; scores["小双"]+=20
-        return scores
-    def _hw(self, seq, alpha=0.3, beta=0.1):
-        l, t = seq[0], 0
-        for v in seq[1:]:
-            l_prev = l
-            l = alpha*v + (1-alpha)*(l+t)
-            t = beta*(l-l_prev) + (1-beta)*t
-        return l, t
-
-
-class BayesianPredictor(BasePredictor):
-    """共轭先验贝叶斯 - 在线频率更新"""
-    name = "bayesian_online"
-    def __init__(self):
-        self.prior = {"大":1,"小":1,"单":1,"双":1}
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        sz = Counter(r["size"] for r in history[-100:])
-        od = Counter(r["odd_even"] for r in history[-100:])
-        p_big = (sz["大"]+self.prior["大"])/(len(history[-100:])+2)
-        p_odd = (od["单"]+self.prior["单"])/(len(history[-100:])+2)
-        scores = self._base_scores(50)
-        scores["大单"]+=p_big*p_odd*40
-        scores["大双"]+=p_big*(1-p_odd)*40
-        scores["小单"]+=(1-p_big)*p_odd*40
-        scores["小双"]+=(1-p_big)*(1-p_odd)*40
-        return scores
-
-
-class BOCDPredictor(BasePredictor):
-    """贝叶斯在线变点检测 - 结构突变识别"""
-    name = "bocd"
-    def __init__(self):
-        self.hazard = 0.01
-        self.mu0, self.kappa0, self.alpha0, self.beta0 = 0, 1, 1, 1
-    def predict(self, history):
-        if len(history) < 20:
-            return self._base_scores()
-        totals = [r["total"] for r in history[-30:]]
-        R = [1.0]
-        for x in totals:
-            pred = R[-1]*self.hazard + (1-R[-1])*(1-self.hazard)
-            R.append(min(pred, 0.99))
-        if R[-1] > 0.5:
-            scores = self._base_scores(50)
-            scores["大单"]+=5; scores["大双"]+=5; scores["小单"]+=5; scores["小双"]+=5
-            return scores
-        return EWMAMultiPredictor().predict(history) if "EWMAMultiPredictor" in globals() else self._base_scores()
-
-
-class KNNPredictor(BasePredictor):
-    """KNN局部敏感哈希 - 相似历史检索"""
-    name = "knn_memory"
-    def predict(self, history):
-        if len(history) < 20:
-            return self._base_scores()
-        k = min(30, len(history)//10)
-        recent = history[-5:]
-        neighbors = []
-        for i in range(len(history)-6):
-            dist = sum(1 for a,b in zip(recent, history[i:i+5])
-                       if a["size"]!=b["size"] or a["odd_even"]!=b["odd_even"])
-            neighbors.append((dist, history[i+5]))
-        neighbors.sort(key=lambda x:x[0])
-        top = [n[1]["size"]+n[1]["odd_even"] for n in neighbors[:k]]
-        cnt = Counter(top)
-        scores = self._base_scores(50)
-        for combo, c in cnt.items():
-            if combo in scores:
-                scores[combo] += (c/k)*40
-        return scores
-
-
-class RandomForestPredictor(BasePredictor):
-    """随机森林 - Bagging集成决策树"""
-    name = "random_forest"
-    def __init__(self):
-        self.clf = None
-        self._train_buffer = []
-    def predict(self, history):
-        try:
-            from sklearn.ensemble import RandomForestClassifier
-        except ImportError:
-            return self._base_scores()
-        if len(history) < 30:
-            return self._base_scores()
-        X, y = self._build_xy(history)
-        if len(set(y)) < 2:
-            return self._base_scores()
-        self.clf = RandomForestClassifier(n_estimators=50, max_depth=5, random_state=42)
-        self.clf.fit(X, y)
-        feat = self._feat(history[-5:])
-        proba = self.clf.predict_proba([feat])[0]
-        labels = self.clf.classes_
-        scores = self._base_scores(50)
-        for lab, p in zip(labels, proba):
-            if lab in scores:
-                scores[lab] += p*40
-        return scores
-    def _build_xy(self, hist):
-        X, y = [], []
-        for i in range(len(hist)-6):
-            X.append(self._feat(hist[i:i+5]))
-            y.append(hist[i+5]["size"]+hist[i+5]["odd_even"])
-        return X, y
-    def _feat(self, window):
-        sz = [1 if r["size"]=="大" else 0 for r in window]
-        od = [1 if r["odd_even"]=="单" else 0 for r in window]
-        return sz + od + [sum(sz)/5, sum(od)/5]
-
-
-class GBDTPredictor(BasePredictor):
-    """梯度提升决策树 - 残差迭代优化"""
-    name = "gbdt"
-    def __init__(self):
-        self.clf = None
-    def predict(self, history):
-        try:
-            from sklearn.ensemble import GradientBoostingClassifier
-        except ImportError:
-            return self._base_scores()
-        if len(history) < 30:
-            return self._base_scores()
-        X, y = self._build_xy(history)
-        if len(set(y)) < 2:
-            return self._base_scores()
-        self.clf = GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
-        self.clf.fit(X, y)
-        feat = self._feat(history[-5:])
-        proba = self.clf.predict_proba([feat])[0]
-        labels = self.clf.classes_
-        scores = self._base_scores(50)
-        for lab, p in zip(labels, proba):
-            if lab in scores:
-                scores[lab] += p*40
-        return scores
-    def _build_xy(self, hist):
-        X, y = [], []
-        for i in range(len(hist)-6):
-            X.append(self._feat(hist[i:i+5]))
-            y.append(hist[i+5]["size"]+hist[i+5]["odd_even"])
-        return X, y
-    def _feat(self, window):
-        sz = [1 if r["size"]=="大" else 0 for r in window]
-        od = [1 if r["odd_even"]=="单" else 0 for r in window]
-        dt = [1 if r["dragon_tiger"]=="龙" else 0 for r in window]
-        return sz + od + dt
-
-
-class SVMPredictor(BasePredictor):
-    """SVM核方法 - 高维超平面分类"""
-    name = "svm_kernel"
-    def __init__(self):
-        self.clf = None
-    def predict(self, history):
-        try:
-            from sklearn.svm import SVC
-        except ImportError:
-            return self._base_scores()
-        if len(history) < 30:
-            return self._base_scores()
-        X, y = self._build_xy(history)
-        if len(set(y)) < 2:
-            return self._base_scores()
-        self.clf = SVC(kernel="rbf", probability=True, random_state=42)
-        self.clf.fit(X, y)
-        feat = self._feat(history[-5:])
-        proba = self.clf.predict_proba([feat])[0]
-        labels = self.clf.classes_
-        scores = self._base_scores(50)
-        for lab, p in zip(labels, proba):
-            if lab in scores:
-                scores[lab] += p*40
-        return scores
-    def _build_xy(self, hist):
-        X, y = [], []
-        for i in range(len(hist)-6):
-            X.append(self._feat(hist[i:i+5]))
-            y.append(hist[i+5]["size"]+hist[i+5]["odd_even"])
-        return X, y
-    def _feat(self, window):
-        return [1 if r["size"]=="大" else 0 for r in window] + [1 if r["odd_even"]=="单" else 0 for r in window]
-
-
-class IsoForestPredictor(BasePredictor):
-    """孤立森林 - 异常检测后回归"""
-    name = "isolation_forest"
-    def predict(self, history):
-        try:
-            from sklearn.ensemble import IsolationForest
-        except ImportError:
-            return self._base_scores()
-        if len(history) < 20:
-            return self._base_scores()
-        X = [self._feat(history[i:i+5]) for i in range(len(history)-5)]
-        clf = IsolationForest(n_estimators=50, contamination=0.1, random_state=42)
-        clf.fit(X)
-        recent = self._feat(history[-5:])
-        score = clf.score_samples([recent])[0]
-        scores = self._base_scores(50)
-        if score < -0.3:
-            for k in scores:
-                scores[k] = 100 - scores[k]
-        return scores
-    def _feat(self, window):
-        return [r["total"] for r in window] + [max(r["nums"])-min(r["nums"]) for r in window]
-
-
-class FFTPredictor(BasePredictor):
-    """FFT频谱分析 - 频域周期提取"""
-    name = "fft_spectrum"
-    def predict(self, history):
-        if len(history) < 16:
-            return self._base_scores()
-        try:
-            import numpy as np
-        except ImportError:
-            return self._base_scores()
-        sz = [1 if r["size"]=="大" else -1 for r in history[-64:]]
-        od = [1 if r["odd_even"]=="单" else -1 for r in history[-64:]]
-        fsz = np.abs(np.fft.rfft(sz))
-        fod = np.abs(np.fft.rfft(od))
-        dom_sz = np.argmax(fsz[1:]) + 1 if len(fsz)>1 else 1
-        dom_od = np.argmax(fod[1:]) + 1 if len(fod)>1 else 1
-        scores = self._base_scores(50)
-        phase_sz = math.sin(2*math.pi*dom_sz*len(sz)/len(sz))
-        phase_od = math.sin(2*math.pi*dom_od*len(od)/len(od))
-        if phase_sz > 0:
-            scores["大单"]+=15; scores["大双"]+=15
-        else:
-            scores["小单"]+=15; scores["小双"]+=15
-        if phase_od > 0:
-            scores["大单"]+=15; scores["小单"]+=15
-        else:
-            scores["大双"]+=15; scores["小双"]+=15
-        return scores
-
-
-class KalmanPredictor(BasePredictor):
-    """卡尔曼滤波 - 最优线性估计"""
-    name = "kalman_filter"
-    def __init__(self):
-        self.x = 0.0
-        self.P = 1.0
-        self.Q = 0.01
-        self.R = 0.1
-    def predict(self, history):
-        if len(history) < 5:
-            return self._base_scores()
-        sz = [1 if r["size"]=="大" else -1 for r in history]
-        od = [1 if r["odd_even"]=="单" else -1 for r in history]
-        x_sz = self._kalman(sz)
-        x_od = self._kalman(od)
-        scores = self._base_scores(50)
-        if x_sz > 0:
-            scores["大单"]+=20; scores["大双"]+=20
-        else:
-            scores["小单"]+=20; scores["小双"]+=20
-        if x_od > 0:
-            scores["大单"]+=20; scores["小单"]+=20
-        else:
-            scores["大双"]+=20; scores["小双"]+=20
-        return scores
-    def _kalman(self, z_seq):
-        x, P = self.x, self.P
-        for z in z_seq:
-            x = x
-            P = P + self.Q
-            K = P / (P + self.R)
-            x = x + K*(z - x)
-            P = (1 - K)*P
-        return x
-
-
-class ParticleFilterPredictor(BasePredictor):
-    """粒子滤波 - 蒙特卡洛递推估计"""
-    name = "particle_filter"
-    def __init__(self, n_particles=100):
-        self.particles = [random.uniform(-1,1) for _ in range(n_particles)]
-    def predict(self, history):
-        if len(history) < 5:
-            return self._base_scores()
-        sz = [1 if r["size"]=="大" else -1 for r in history[-10:]]
-        weights = [1.0]*len(self.particles)
-        for z in sz:
-            for i,p in enumerate(self.particles):
-                weights[i] *= max(0.01, 1-abs(z-p))
-        s = sum(weights)
-        weights = [w/s for w in weights]
-        estimate = sum(p*w for p,w in zip(self.particles, weights))
-        scores = self._base_scores(50)
-        if estimate > 0:
-            scores["大单"]+=20; scores["大双"]+=20
-        else:
-            scores["小单"]+=20; scores["小双"]+=20
-        self.particles = random.choices(self.particles, weights=weights, k=len(self.particles))
-        return scores
-
-
-class NashPredictor(BasePredictor):
-    """纳什均衡 - 博弈论策略推断"""
-    name = "nash_equilibrium"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        recent = history[-10:]
-        combos = [r["size"]+r["odd_even"] for r in recent]
-        cnt = Counter(combos)
-        total = len(combos)
-        payoff = {c: cnt[c]/total for c in ["大单","大双","小单","小双"]}
-        best = max(payoff, key=payoff.get)
-        scores = self._base_scores(50)
-        scores[best] += 30
-        return scores
-
-
-class KellyPredictor(BasePredictor):
-    """凯利公式 - 最优下注比例"""
-    name = "kelly_criterion"
-    def predict(self, history):
-        if len(history) < 20:
-            return self._base_scores()
-        sz = Counter(r["size"] for r in history[-50:])
-        od = Counter(r["odd_even"] for r in history[-50:])
-        n = 50
-        p_big = sz["大"]/n
-        p_odd = od["单"]/n
-        scores = self._base_scores(50)
-        scores["大单"] += p_big*p_odd*50
-        scores["大双"] += p_big*(1-p_odd)*50
-        scores["小单"] += (1-p_big)*p_odd*50
-        scores["小双"] += (1-p_big)*(1-p_odd)*50
-        return scores
-
-
-class ReflexivityPredictor(BasePredictor):
-    """反身性模型 - 偏见与基本面互馈"""
-    name = "soros_reflexivity"
-    def __init__(self):
-        self.bias = 0
-    def predict(self, history):
-        if len(history) < 6:
-            return self._base_scores()
-        last3 = history[-3:]
-        hit = sum(1 for i in range(1,4) if i<len(last3) and
-                  last3[i]["size"]==last3[i-1]["size"])
-        scores = self._base_scores(50)
-        if hit >= 2:
-            self.bias = min(self.bias+0.1, 1)
-        else:
-            self.bias = max(self.bias-0.1, -1)
-        if self.bias > 0:
-            last = history[-1]["size"]
-            for combo in scores:
-                if combo[0]==last:
-                    scores[combo]+=25
-        else:
-            last = history[-1]["size"]
-            flip = "小" if last=="大" else "大"
-            for combo in scores:
-                if combo[0]==flip:
-                    scores[combo]+=25
-        return scores
-
-
-class MarketDepthPredictor(BasePredictor):
-    """市场深度模拟 - 盘口压力推断"""
-    name = "market_depth"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        sz = Counter(r["size"] for r in history[-20:])
-        od = Counter(r["odd_even"] for r in history[-20:])
-        big_pressure = sz["大"]/(sz["大"]+sz["小"])
-        odd_pressure = od["单"]/(od["单"]+od["双"])
-        scores = self._base_scores(50)
-        if big_pressure > 0.6:
-            scores["大单"]+=15; scores["大双"]+=15
-        elif big_pressure < 0.4:
-            scores["小单"]+=15; scores["小双"]+=15
-        if odd_pressure > 0.6:
-            scores["大单"]+=15; scores["小单"]+=15
-        elif odd_pressure < 0.4:
-            scores["大双"]+=15; scores["小双"]+=15
-        return scores
-
-
-class EvoGamePredictor(BasePredictor):
-    """演化博弈 - 复制动态收敛"""
-    name = "evolutionary_game"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        recent = history[-10:]
-        combos = [r["size"]+r["odd_even"] for r in recent]
-        cnt = Counter(combos)
-        total = sum(cnt.values())
-        fitness = {c: (cnt.get(c,0)/total)**2 for c in ["大单","大双","小单","小双"]}
-        avg_fit = sum(fitness.values())/4
-        scores = self._base_scores(50)
-        for c in fitness:
-            if fitness[c] > avg_fit:
-                scores[c] += (fitness[c]-avg_fit)*100
-        return scores
-
-
-class PiCyclePredictor(BasePredictor):
-    """π周期探测 - 无理数混沌周期"""
-    name = "pi_chaos_cycle"
-    def predict(self, history):
-        if len(history) < 30:
-            return self._base_scores()
-        pi = "14159265358979323846"
-        periods = [int(pi[i])+2 for i in range(10)]
-        h = history
-        best_period, best_score, best_pred = None, 0, None
-        for period in set(periods):
-            if len(h) < period*3:
-                continue
-            template = [r["size"]+r["odd_even"] for r in h[-period:]]
-            matches, nexts = 0, []
-            for i in range(len(h)-period*3, len(h)-period, period):
-                if i < 0: continue
-                if all(h[i+j]["size"]+h[i+j]["odd_even"]==template[j] for j in range(period)):
-                    matches += 1
-                    nexts.append(h[i+period]["size"]+h[i+period]["odd_even"])
-            rate = matches/max(1, len(h)//period-3)
-            if rate > best_score and rate > 0.15:
-                best_score, best_period = rate, period
-                if nexts:
-                    best_pred = Counter(nexts).most_common(1)[0][0]
-        scores = self._base_scores(50)
-        if best_pred:
-            scores[best_pred] += 30 + best_score*40
-        return scores
-
-
-class LyapunovPredictor(BasePredictor):
-    """李雅普诺夫指数 - 混沌可预测性度量"""
-    name = "lyapunov_exp"
-    def predict(self, history):
-        if len(history) < 20:
-            return self._base_scores()
-        totals = [r["total"] for r in history[-20:]]
-        diverge = []
-        for i in range(10):
-            for j in range(i+1, 10):
-                d0 = abs(totals[i]-totals[j])
-                d1 = abs(totals[i+1]-totals[j+1]) if i+1<len(totals) and j+1<len(totals) else 0
-                if d0 > 0:
-                    diverge.append(math.log(d1/d0) if d1>0 else -5)
-        le = sum(diverge)/len(diverge) if diverge else 0
-        scores = self._base_scores(50)
-        if le > 0:
-            last = history[-1]["size"]+history[-1]["odd_even"]
-            scores[last] += 20
-        else:
-            flip = {"大单":"小双","大双":"小单","小单":"大双","小双":"大单"}
-            last = history[-1]["size"]+history[-1]["odd_even"]
-            if last in flip:
-                scores[flip[last]] += 20
-        return scores
-
-
-class HurstPredictor(BasePredictor):
-    """Hurst指数 - 长期记忆性检测"""
-    name = "hurst_exponent"
-    def predict(self, history):
-        if len(history) < 20:
-            return self._base_scores()
-        sz = [1 if r["size"]=="大" else 0 for r in history[-20:]]
-        h = self._rs(sz)
-        scores = self._base_scores(50)
-        if h > 0.55:
-            last = history[-1]["size"]
-            for combo in scores:
-                if combo[0]==last:
-                    scores[combo]+=25
-        elif h < 0.45:
-            last = history[-1]["size"]
-            flip = "小" if last=="大" else "大"
-            for combo in scores:
-                if combo[0]==flip:
-                    scores[combo]+=25
-        return scores
-    def _rs(self, series):
-        n = len(series)
-        mean = sum(series)/n
-        z = [s-mean for s in series]
-        cum = [sum(z[:i+1]) for i in range(n)]
-        r = max(cum)-min(cum)
-        s = math.sqrt(sum(x*x for x in z)/n) or 1
-        return math.log(r/s)/math.log(n) if n>1 else 0.5
-
-
-class RecurrencePredictor(BasePredictor):
-    """递归图分析 - 相空间轨迹结构"""
-    name = "recurrence_plot"
-    def predict(self, history):
-        if len(history) < 15:
-            return self._base_scores()
-        totals = [r["total"] for r in history[-15:]]
-        m, eps = 3, 5
-        rec = 0
-        for i in range(len(totals)-m):
-            for j in range(i+1, len(totals)-m):
-                d = sum((totals[i+k]-totals[j+k])**2 for k in range(m))
-                if d < eps*eps:
-                    rec += 1
-        det = rec/max(1, (len(totals)-m)*(len(totals)-m-1)//2)
-        scores = self._base_scores(50)
-        if det > 0.3:
-            last = history[-1]["size"]+history[-1]["odd_even"]
-            scores[last]+=25
-        return scores
-
-
-class PoincarePredictor(BasePredictor):
-    """庞加莱截面映射 - 吸引子降维"""
-    name = "poincare_map"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        totals = [r["total"] for r in history[-10:]]
-        spans = [max(r["nums"])-min(r["nums"]) for r in history[-10:]]
-        clusters = {}
-        for t, s in zip(totals, spans):
-            k = (t//5, s)
-            clusters[k] = clusters.get(k, 0)+1
-        best = max(clusters, key=clusters.get)
-        scores = self._base_scores(50)
-        if best[0] >= 3:
-            scores["大单"]+=20; scores["大双"]+=20
-        else:
-            scores["小单"]+=20; scores["小双"]+=20
-        return scores
-
-
-class StackingPredictor(BasePredictor):
-    """Stacking元学习 - 两层模型融合"""
-    name = "stacking_meta"
-    def __init__(self):
-        self.base_learners = []
-        self.meta_weights = [0.25, 0.25, 0.25, 0.25]
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        scores = self._base_scores(0)
-        methods = [
-            lambda h: {"大单":60,"大双":50,"小单":40,"小双":50} if h[-1]["size"]=="大" else {"大单":40,"大双":50,"小单":60,"小双":50},
-            lambda h: {"大单":50,"大双":60,"小单":50,"小双":40} if h[-1]["odd_even"]=="双" else {"大单":50,"大双":40,"小单":50,"小双":60},
-            lambda h: {"大单":55,"大双":45,"小单":45,"小双":55},
-            lambda h: {"大单":45,"大双":55,"小单":55,"小双":45},
-        ]
-        for w, m in zip(self.meta_weights, methods):
-            pred = m(history)
-            for k in scores:
-                scores[k] += pred[k]*w
-        return scores
-
-
-class MoEPredictor(BasePredictor):
-    """混合专家门控 - 动态路由选择"""
-    name = "moe_gate"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        recent = history[-5:]
-        streak = sum(1 for i in range(1,5) if i<len(recent) and recent[i]["size"]==recent[i-1]["size"])
-        scores = self._base_scores(50)
-        if streak >= 3:
-            last = recent[-1]["size"]
-            for combo in scores:
-                if combo[0]==last:
-                    scores[combo]+=30
-        else:
-            sz = sum(1 if r["size"]=="大" else -1 for r in history[-10:])
-            if sz > 0:
-                scores["小单"]+=20; scores["小双"]+=20
+            attr = POS_ATTR[seven_y]
+            new_digit = (getattr(current, attr) + taken[0]) % 10
+            h, t, o = current.hundreds, current.tens, current.ones
+            if seven_y in (2, 6):
+                h = new_digit
+            elif seven_y in (0, 5):
+                t = new_digit
             else:
-                scores["大单"]+=20; scores["大双"]+=20
-        return scores
+                o = new_digit
+            new_draw = Draw("新", h, t, o)
+
+        y_n = new_draw.sum_value % 7
+        is_kill = False
+        group = None
+
+        if y_n == 0:
+            is_kill, group = True, Group.SMALL_ODD
+        elif y_n == 1:
+            is_kill, group = True, Group.BIG_ODD
+        elif y_n == 2:
+            is_kill, group = True, Group.SMALL_EVEN
+        elif y_n == 3:
+            is_kill, group = True, Group.BIG_EVEN
+        elif y_n == 4:
+            is_kill, group = True, Group.SMALL_ODD
+        elif y_n == 5:
+            is_kill, group = True, new_draw.group
+        elif y_n == 6:
+            is_kill, group = True, OPPOSITE_GROUP.get(new_draw.group, new_draw.group)
+
+        if is_kill and group:
+            weight = 3 if distance == 1 else (2 if distance == 2 else 1)
+            votes[group] = votes.get(group, 0) + weight
+
+    if votes:
+        kill_group = max(votes, key=votes.get)
+    else:
+        counts = Counter(d.group for d in draws)
+        kill_group = counts.most_common()[-1][0] if counts else Group.SMALL_ODD
+
+    if len(draws) >= 3:
+        last1 = draws[1].group if len(draws) > 1 else None
+        last2 = draws[2].group if len(draws) > 2 else None
+        if last1 == last2 and last1 == kill_group:
+            kill_group = OPPOSITE_GROUP.get(kill_group, kill_group)
+
+    kill_str = "杀" + kill_group.value
+
+    recent_sums = [d.sum_value for d in draws[:50]]
+    recent_avg = sum(recent_sums) / len(recent_sums) if recent_sums else 14
+
+    typical = TYPICAL_CODES.get(kill_group, list(range(0, 28)))
+    candidates = []
+    for code in typical:
+        deviation = abs(code - recent_avg)
+        freq_penalty = 0
+        if recent_sums:
+            freq = recent_sums.count(code)
+            freq_penalty = freq * 1.5
+        candidates.append((code, deviation + freq_penalty))
+
+    candidates.sort(key=lambda x: x[1])
+    pred_sum = candidates[0][0] if candidates else 14
+
+    if recent_sums and len(recent_sums) >= 3:
+        last3_avg = sum(recent_sums[:3]) / 3
+        if abs(pred_sum - last3_avg) > 10:
+            if pred_sum < 14:
+                pred_sum = min(typical, key=lambda x: abs(x - (recent_avg + 5)))
+            else:
+                pred_sum = min(typical, key=lambda x: abs(x - (recent_avg - 5)))
+
+    pred_sum = max(0, min(27, pred_sum))
+
+    return {'kill': kill_str, 'sum': pred_sum}
 
 
-class BMAPredictor(BasePredictor):
-    """贝叶斯模型平均 - 后验概率加权"""
-    name = "bma_weight"
+def get_combo(sum_value):
+    return ("小" if sum_value <= 13 else "大") + ("双" if sum_value % 2 == 0 else "单")
+
+
+def normalize_r(R):
+    while R > 27:
+        R -= 28
+    while R < 0:
+        R += 28
+    return max(0, min(27, R))
+
+
+def compute_main_algorithm(data, index):
+    if index >= len(data) or index + 15 >= len(data):
+        return None
+
+    cur, back5, back10, back15 = data[index], data[index+5], data[index+10], data[index+15]
+
+    a, b, c = cur['nums']
+    a5, b5, c5 = back5['nums']
+    a10, b10, c10 = back10['nums']
+    a15, b15, c15 = back15['nums']
+
+    S, S5, S10, S15 = sum(cur['nums']), sum(back5['nums']), sum(back10['nums']), sum(back15['nums'])
+
+    if S == 0:
+        S = 1
+
+    T1 = (a + c) * b + b10
+    T2 = (a5 + c5) * b5 + b15
+    R = (T1 + T2) // 2
+
+    momentum = (S - S5) + (S5 - S10) + (S10 - S15)
+    R += max(-5, min(5, momentum // 3))
+    R = normalize_r(R)
+
+    recent_sums = [data[i]['sum'] for i in range(index + 1, min(index + 50, len(data)))]
+    if recent_sums:
+        recent_avg = sum(recent_sums) / len(recent_sums)
+        recent_std = (sum((x - recent_avg) ** 2 for x in recent_sums) / len(recent_sums)) ** 0.5 if recent_sums else 5
+
+        if recent_std > 6:
+            R = normalize_r(int(recent_avg) + random.randint(-3, 3))
+        elif abs(R - recent_avg) > 8:
+            R = normalize_r(int(recent_avg) + (R - int(recent_avg)) // 2)
+
+        recent_counts = Counter(recent_sums[-8:])
+        if recent_counts and recent_counts.most_common(1)[0][1] >= 3:
+            freq_val = recent_counts.most_common(1)[0][0]
+            if abs(R - freq_val) < 3:
+                R = normalize_r(R + 7)
+
+        if len(recent_sums) >= 5:
+            last5_avg = sum(recent_sums[:5]) / 5
+            if R < 10 and last5_avg > 18:
+                R = normalize_r(R + 14)
+            elif R > 17 and last5_avg < 9:
+                R = normalize_r(R - 14)
+
+    kill = "杀" + get_combo(R)
+
+    return {'kill': kill, 'sum': R}
+
+
+def compute_5y_algorithm(data, index):
+    if index >= len(data) or index + 10 >= len(data):
+        return None
+
+    cur, back5, back10 = data[index], data[index+5], data[index+10]
+
+    a, b, c = cur['nums']
+    a5, b5, c5 = back5['nums']
+    a10, b10, c10 = back10['nums']
+
+    S, S5, S10 = sum(cur['nums']), sum(back5['nums']), sum(back10['nums'])
+
+    if S == 0:
+        S = 1
+
+    valB = (b % 5 + 1)
+    valS = (S % 5 + 1)
+    base = (valB * valS) % 10
+
+    volatility = abs(S - S5) + abs(S5 - S10)
+    volatility_factor = (volatility % 5) + 1
+
+    trend = 2 if (S > S5 and S5 > S10) else (0 if (S < S5 and S5 < S10) else 1)
+
+    R = normalize_r(base * 3 + volatility_factor * 2 + trend)
+
+    recent_sums = [data[i]['sum'] for i in range(index + 1, min(index + 50, len(data)))]
+    if recent_sums:
+        recent_avg = sum(recent_sums) / len(recent_sums)
+        recent_var = sum((x - recent_avg) ** 2 for x in recent_sums) / len(recent_sums)
+
+        if recent_var > 20:
+            R = normalize_r(int(recent_avg) + random.randint(-4, 4))
+
+        recent_counts = Counter(recent_sums[-10:])
+        if recent_counts:
+            most_common = recent_counts.most_common(3)
+            weights = [0.5, 0.3, 0.2]
+            weighted_sum = 0
+            total_w = 0
+            for i, (val, cnt) in enumerate(most_common):
+                if i < len(weights):
+                    weighted_sum += val * weights[i] * cnt
+                    total_w += weights[i] * cnt
+            if total_w > 0:
+                weighted_avg = weighted_sum / total_w
+                R = normalize_r(int(weighted_avg * 0.6 + R * 0.4))
+
+        if len(recent_sums) >= 6:
+            first3 = sum(recent_sums[:3]) / 3
+            last3 = sum(recent_sums[-3:]) / 3
+            diff = last3 - first3
+            if abs(diff) > 5:
+                R = normalize_r(R + int(diff / 2))
+
+    if index + 1 < len(data):
+        recent_shapes = [get_combo(data[i]['sum']) for i in range(index + 1, min(index + 6, len(data)))]
+        kill_shape = get_combo(R)
+        if kill_shape in recent_shapes:
+            R = normalize_r(R + 7)
+            if get_combo(R) == kill_shape:
+                R = normalize_r(R + 14)
+
+    kill = "杀" + get_combo(R)
+
+    return {'kill': kill, 'sum': R}
+
+
+class PC28PredictorV7:
     def __init__(self):
-        self.models = {"动量":0, "反转":0}
-        self.samples = 0
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        self.samples += 1
-        recent = history[-5:]
-        streak = sum(1 for i in range(1,5) if i<len(recent) and recent[i]["size"]==recent[i-1]["size"])
-        if streak >= 3:
-            self.models["动量"] += 1
-        else:
-            self.models["反转"] += 1
-        total = self.models["动量"]+self.models["反转"]
-        p_mom = self.models["动量"]/total if total else 0.5
-        scores = self._base_scores(50)
-        last = history[-1]["size"]
-        if p_mom > 0.5:
-            for combo in scores:
-                if combo[0]==last:
-                    scores[combo]+=p_mom*30
-        else:
-            flip = "小" if last=="大" else "大"
-            for combo in scores:
-                if combo[0]==flip:
-                    scores[combo]+=(1-p_mom)*30
-        return scores
+        self.history = []
+        self.global_prior = {
+            '小单': 0.20, '小双': 0.28, '大单': 0.24, '大双': 0.28
+        }
+        self.alpha = 1.0
+
+    def add_data(self, data_list):
+        self.history = []
+        for item in data_list:
+            if 'expect' in item:
+                period = item['expect']
+                numbers = item.get('opennum', item.get('numbers', ''))
+                if '+' in str(numbers):
+                    nums = [int(n) for n in str(numbers).split('+')]
+                else:
+                    nums = [int(n) for n in str(numbers)]
+                total = sum(nums)
+            else:
+                period = item.get('period', '')
+                numbers = item.get('numbers', '')
+                total = item.get('s', 0)
+                if '+' in str(numbers):
+                    nums = [int(n) for n in str(numbers).split('+')]
+                else:
+                    nums = []
+
+            is_big = total >= 14
+            is_single = total % 2 == 1
+            combination = ('大' if is_big else '小') + ('单' if is_single else '双')
+
+            self.history.append({
+                'period': period,
+                'numbers': numbers,
+                'total': total,
+                'combination': combination,
+                'is_big': is_big,
+                'is_single': is_single,
+                'nums': nums,
+                'yu5': total % 5
+            })
+
+    def get_smoothed_trans_prob(self, from_combo, to_combo, history_slice):
+        trans_count = 0
+        total_from = 0
+        for i in range(len(history_slice) - 1):
+            if history_slice[i]['combination'] == from_combo:
+                total_from += 1
+                if history_slice[i+1]['combination'] == to_combo:
+                    trans_count += 1
+        num_classes = 4
+        smoothed_prob = (trans_count + self.alpha) / (total_from + self.alpha * num_classes)
+        return smoothed_prob
+
+    def get_cold_streak(self, combo, history_slice):
+        n = len(history_slice)
+        streak = 0
+        for i in range(n - 1, -1, -1):
+            if history_slice[i]['combination'] == combo:
+                break
+            streak += 1
+        return streak
+
+    def calculate_next_prob(self, combo, history_slice):
+        if len(history_slice) < 1:
+            return self.global_prior[combo]
+        current = history_slice[-1]['combination']
+        n = len(history_slice)
+        trans_prob = self.get_smoothed_trans_prob(current, combo, history_slice)
+        global_freq = sum(1 for d in history_slice if d['combination'] == combo) / n
+        recent = history_slice[-10:] if n >= 10 else history_slice
+        recent_freq = sum(1 for d in recent if d['combination'] == combo) / len(recent)
+        short = history_slice[-5:] if n >= 5 else history_slice
+        short_freq = sum(1 for d in short if d['combination'] == combo) / len(short)
+        combined_prob = (
+            trans_prob * 0.40 +
+            global_freq * 0.15 +
+            recent_freq * 0.25 +
+            short_freq * 0.20
+        )
+        return combined_prob
+
+    def _compute_probs_and_cold(self, history_slice):
+        probs = {}
+        cold_streaks = {}
+        for combo in ['小单', '小双', '大单', '大双']:
+            probs[combo] = self.calculate_next_prob(combo, history_slice)
+            cold_streaks[combo] = self.get_cold_streak(combo, history_slice)
+        return probs, cold_streaks
+
+    def predict_kill_group(self):
+        if len(self.history) < 10:
+            return None, 0
+        probs, cold_streaks = self._compute_probs_and_cold(self.history)
+        protected = set()
+        for combo in ['小单', '小双', '大单', '大双']:
+            if cold_streaks[combo] >= 5:
+                protected.add(combo)
+        candidates = [c for c in ['小单', '小双', '大单', '大双'] if c not in protected]
+        if not candidates:
+            candidates = ['小单', '小双', '大单', '大双']
+        kill_group = min(candidates, key=lambda c: probs[c])
+        sorted_probs = sorted(probs.values())
+        prob_gap = sorted_probs[1] - sorted_probs[0] if len(sorted_probs) > 1 else 0
+        confidence = 0.70 + min(prob_gap * 2, 0.20)
+        if prob_gap > 0.08:
+            confidence += 0.03
+        if len(self.history) >= 20:
+            val_acc = self._validate()
+            confidence = confidence * 0.6 + val_acc * 0.4
+        confidence = min(confidence, 0.92)
+        return kill_group, confidence
+
+    def _validate(self):
+        correct = 0
+        total = 0
+        for i in range(10, len(self.history)):
+            hist_slice = self.history[:i]
+            probs, cold_streaks = self._compute_probs_and_cold(hist_slice)
+            protected = set()
+            for combo in ['小单', '小双', '大单', '大双']:
+                if cold_streaks[combo] >= 5:
+                    protected.add(combo)
+            candidates = [c for c in ['小单', '小双', '大单', '大双'] if c not in protected]
+            if not candidates:
+                candidates = ['小单', '小双', '大单', '大双']
+            predicted_kill = min(candidates, key=lambda c: probs[c])
+            actual = self.history[i]['combination']
+            if actual == predicted_kill:
+                correct += 1
+            total += 1
+        return (correct / total) if total > 0 else 0.7
+
+    def find_double_group(self, kill_group):
+        all_groups = ['小单', '小双', '大单', '大双']
+        remaining = [g for g in all_groups if g != kill_group]
+        if len(self.history) < 5:
+            return remaining[:2], 0.5
+        probs = {}
+        for combo in remaining:
+            probs[combo] = self.calculate_next_prob(combo, self.history)
+        sorted_groups = sorted(probs.items(), key=lambda x: x[1], reverse=True)
+        best_two = [sorted_groups[0][0], sorted_groups[1][0]]
+        expected_rate = sorted_groups[0][1] + sorted_groups[1][1]
+        return best_two, min(expected_rate, 0.80)
+
+    def recommend_codes(self, double_group):
+        codes = {}
+        recent = self.history[-30:] if len(self.history) >= 30 else self.history
+        for combo in double_group:
+            size, parity = combo[0], combo[1]
+            valid = []
+            for t in range(28):
+                t_big = t >= 14
+                t_single = t % 2 == 1
+                match = (t_big == (size == '大')) and (t_single == (parity == '单'))
+                if match:
+                    freq = sum(1 for d in recent if d['total'] == t)
+                    valid.append((t, freq))
+            valid.sort(key=lambda x: x[1], reverse=True)
+            codes[combo] = [t[0] for t in valid[:2]]
+        return codes
+
+    def get_trend(self):
+        if len(self.history) < 5:
+            return None
+        recent = self.history[-5:]
+        return {
+            'big_count': sum(1 for d in recent if d['is_big']),
+            'single_count': sum(1 for d in recent if d['is_single']),
+            'avg_total': sum(d['total'] for d in recent) / 5,
+            'recent_totals': [d['total'] for d in recent]
+        }
 
 
-class ARCHPredictor(BasePredictor):
-    """ARCH效应检测 - 波动率聚类"""
-    name = "arch_detector"
-    def predict(self, history):
-        if len(history) < 15:
-            return self._base_scores()
-        totals = [r["total"] for r in history[-15:]]
-        mean = sum(totals)/len(totals)
-        resid = [t-mean for t in totals]
-        arch = sum(r*r for r in resid)/len(resid)
-        scores = self._base_scores(50)
-        if arch > 50:
-            for k in scores:
-                scores[k] = 100-scores[k]
-        return scores
+def xiaodun_predict(data_list):
+    predictor = PC28PredictorV7()
+    predictor.add_data(data_list)
+    kill_group, confidence = predictor.predict_kill_group()
+    double_group, double_rate = predictor.find_double_group(kill_group)
+    special_codes = predictor.recommend_codes(double_group)
+    return {
+        'kill_group': kill_group,
+        'double_group': double_group,
+        'special_codes': special_codes
+    }
 
 
-class ARIMAPredictor(BasePredictor):
-    """ARIMA简化 - 自回归差分"""
-    name = "arima_simplified"
-    def predict(self, history):
-        if len(history) < 10:
-            return self._base_scores()
-        totals = [r["total"] for r in history[-10:]]
-        diff = [totals[i]-totals[i-1] for i in range(1, len(totals))]
-        if not diff:
-            return self._base_scores()
-        ar1 = sum(diff[i]*diff[i-1] for i in range(1, len(diff)))/sum(d*d for d in diff[:-1]) if sum(d*d for d in diff[:-1]) else 0
-        pred_diff = ar1*diff[-1]
-        pred_total = totals[-1]+pred_diff
-        scores = self._base_scores(50)
-        if pred_total >= 14:
-            scores["大单"]+=20; scores["大双"]+=20
-        else:
-            scores["小单"]+=20; scores["小双"]+=20
-        if int(pred_total)%2==1:
-            scores["大单"]+=15; scores["小单"]+=15
-        else:
-            scores["大双"]+=15; scores["小双"]+=15
-        return scores
-
-
-class WaveletPredictor(BasePredictor):
-    """Haar小波分解 - 多分辨率趋势"""
-    name = "wavelet_haar"
-    def predict(self, history):
-        if len(history) < 8:
-            return self._base_scores()
-        sz = [1 if r["size"]=="大" else 0 for r in history[-8:]]
-        cA = [(sz[i]+sz[i+1])/2 for i in range(0, 8, 2)]
-        trend = sum(cA)/len(cA)
-        scores = self._base_scores(50)
-        if trend > 0.5:
-            scores["大单"]+=25; scores["大双"]+=25
-        else:
-            scores["小单"]+=25; scores["小双"]+=25
-        return scores
+def compute_xiaodun_algorithm(data, index):
+    if len(data) < 10:
+        return None
+    xd_data = []
+    for d in data:
+        xd_data.append({
+            'period': str(d['issue']),
+            'opennum': f"{d['nums'][0]}+{d['nums'][1]}+{d['nums'][2]}"
+        })
+    result = xiaodun_predict(xd_data)
+    if not result or result['kill_group'] is None:
+        return None
+    kill_group = result['kill_group']
+    double_group = result['double_group']
+    special_codes = result['special_codes']
+    all_codes = []
+    for codes in special_codes.values():
+        all_codes.extend(codes)
+    unique_codes = sorted(set(all_codes))
+    recommend_sums = unique_codes[:6]
+    pred_sum = all_codes[0] if all_codes else 14
+    return {
+        'kill': '杀' + kill_group,
+        'sum': pred_sum,
+        'recommendations': double_group,
+        'recommend_sums': recommend_sums
+    }
 
 
 class KillGroupPredictor:
-    """基于 30 算法集成投票的杀组预测器"""
+    """基于 4 算法回测动态选择的杀组预测器"""
+
+    ALGORITHMS = {
+        'tianzi': {'name': '天子算法', 'fn': compute_main_algorithm},
+        '5y': {'name': '5Y算法', 'fn': compute_5y_algorithm},
+        'xiaofeng': {'name': '小枫算法', 'fn': compute_xiaofeng_algorithm},
+        'xiaodun': {'name': '小盾算法', 'fn': compute_xiaodun_algorithm},
+    }
+
     def __init__(self):
-        self.predictors = [
-            Markov3Predictor(),
-            Markov4Predictor(),
-            EWMAMultiPredictor(),
-            HoltWintersPredictor(),
-            BayesianPredictor(),
-            BOCDPredictor(),
-            KNNPredictor(),
-            RandomForestPredictor(),
-            GBDTPredictor(),
-            SVMPredictor(),
-            IsoForestPredictor(),
-            FFTPredictor(),
-            KalmanPredictor(),
-            ParticleFilterPredictor(),
-            NashPredictor(),
-            KellyPredictor(),
-            ReflexivityPredictor(),
-            MarketDepthPredictor(),
-            EvoGamePredictor(),
-            PiCyclePredictor(),
-            LyapunovPredictor(),
-            HurstPredictor(),
-            RecurrencePredictor(),
-            PoincarePredictor(),
-            StackingPredictor(),
-            MoEPredictor(),
-            BMAPredictor(),
-            ARCHPredictor(),
-            ARIMAPredictor(),
-            WaveletPredictor(),
+        logger.info(f"杀组预测器已加载 {len(self.ALGORITHMS)} 个算法引擎")
+
+    def _history_to_algo_data(self, history: list) -> list:
+        """把最旧→最新的 history 转成算法需要的新est-first数据"""
+        return [
+            {
+                'issue': str(rec.get('issue', '')),
+                'nums': rec.get('nums', []),
+                'sum': rec.get('total', 0),
+            }
+            for rec in reversed(history)
         ]
-        logger.info(f"杀组预测器已加载 {len(self.predictors)} 个算法引擎")
+
+    def _predict_one(self, key: str, history: list) -> Optional[str]:
+        """调用单个算法，返回杀组字符串（不含'杀'），失败返回 None"""
+        fn = self.ALGORITHMS[key]['fn']
+        data = self._history_to_algo_data(history)
+        if not data:
+            return None
+        try:
+            result = fn(data, 0)
+        except Exception:
+            return None
+        if not result or not isinstance(result, dict):
+            return None
+        kill = result.get('kill')
+        if kill is None:
+            return None
+        if isinstance(kill, str):
+            kill = kill.replace('杀', '')
+        return kill if kill in COMBOS else None
+
+    def _majority_kill(self, predictions: List[str]) -> str:
+        if not predictions:
+            return '小单'
+        counts = Counter(predictions)
+        return counts.most_common(1)[0][0]
 
     def predict_kill(self, history: list) -> tuple[str, float]:
         """
-        history: list of dict with keys: size, odd_even, total, nums, issue, dragon_tiger
-                时序须为 最旧 → 最新
+        history: list of dict with keys: size, odd_even, total, nums, issue
+                 时序须为 最旧 → 最新
         返回: (建议杀的组合, 置信度)
         逻辑: 回测最近10期，选择胜率最高的算法，并用其预测当前期；每期都重新回测并选择
         """
-        if not self.predictors:
-            return "小单", 0.5
+        if not history:
+            return '小单', 0.5
 
         n_backtest = 10
         min_hist = max(2, n_backtest)
 
-        # 历史不足时退化到全体投票
+        # 历史不足时退化到 4 算法投票
         if len(history) < min_hist:
-            scores = {"大单": 0.0, "大双": 0.0, "小单": 0.0, "小双": 0.0}
-            valid_count = 0
-            for p in self.predictors:
-                try:
-                    pred = p.predict(history)
-                    for k in scores:
-                        scores[k] += pred.get(k, 50)
-                    valid_count += 1
-                except Exception:
-                    continue
-            if valid_count == 0:
-                return "小单", 0.5
-            for k in scores:
-                scores[k] /= valid_count
-            best = max(scores, key=scores.get)
-            return best, 0.5
+            preds = []
+            for key in self.ALGORITHMS:
+                pred = self._predict_one(key, history)
+                if pred:
+                    preds.append(pred)
+            kill_target = self._majority_kill(preds)
+            logger.info(f"[杀组动态选择] 历史不足{min_hist}期，退化为多数投票 -> 杀 {kill_target}")
+            return kill_target, 0.5
 
         # 回测窗口：最近 n_backtest 期
         test_start = len(history) - n_backtest
         win_rates = {}
 
-        for p in self.predictors:
+        for key in self.ALGORITHMS:
             wins = 0
             valid = 0
             for i in range(test_start, len(history)):
                 train_hist = history[:i]
-                actual = history[i]["size"] + history[i]["odd_even"]
-                try:
-                    pred_scores = p.predict(train_hist)
-                    predicted = max(pred_scores, key=pred_scores.get)
-                    # 当前杀组逻辑：predicted 为预测最可能开出的组合，我们杀掉它；
-                    # 若实际不等于 predicted，则下注的另外3组中奖，视为该算法策略赢。
-                    if predicted != actual:
-                        wins += 1
-                    valid += 1
-                except Exception:
+                actual = history[i]['size'] + history[i]['odd_even']
+                pred = self._predict_one(key, train_hist)
+                if pred is None:
                     continue
-            win_rates[p.name] = wins / valid if valid > 0 else 0.0
+                valid += 1
+                # 算法给出的是“最可能开出的组合”，杀掉它；实际不等于预测则视为该策略赢
+                if pred != actual:
+                    wins += 1
+            if valid > 0:
+                win_rates[key] = wins / valid
 
         if not win_rates:
-            return "小单", 0.5
+            return '小单', 0.5
 
-        best_name = max(win_rates, key=win_rates.get)
-        best_rate = win_rates[best_name]
-        best_predictor = next((p for p in self.predictors if p.name == best_name), None)
-
-        if best_predictor is None:
-            return "小单", 0.5
-
-        final_scores = best_predictor.predict(history)
-        kill_target = max(final_scores, key=final_scores.get)
+        best_key = max(win_rates, key=win_rates.get)
+        best_rate = win_rates[best_key]
+        kill_target = self._predict_one(best_key, history)
+        if kill_target is None:
+            kill_target = '小单'
 
         confidence = min(0.99, max(0.25, best_rate))
-        logger.info(f"[杀组动态选择] 近{n_backtest}期回测最高胜率: {best_name} ({best_rate:.1%}) -> 杀 {kill_target}")
+        logger.info(f"[杀组动态选择] 近{n_backtest}期回测最高胜率: {self.ALGORITHMS[best_key]['name']} ({best_rate:.1%}) -> 杀 {kill_target}")
         return kill_target, confidence
 
 
@@ -1035,7 +769,7 @@ class UserState:
         # 上期ABC杀球记录 {b_char: [killed_digits]}
         self.last_ball_kills = {}
 
-        # 杀组设置（基于30算法集成投票）
+        # 杀组设置（基于4算法动态选择）
         self.kill_enabled = False
         self.kill_bet_amount = 100.0
         self.kill_martingale_multiplier = 2.0
@@ -1306,14 +1040,14 @@ class SystemOrchestrator:
             return "✅ " if m in u_state.selected_modes else "⬜ "
         return [
             [Button.inline(f"{chk('ball')}启用 ABC杀球模式", data=b"toggle_mode_ball")],
-            [Button.inline(f"{chk('kill')}启用 30算法杀组模式", data=b"toggle_mode_kill")],
+            [Button.inline(f"{chk('kill')}启用 4算法杀组模式", data=b"toggle_mode_kill")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
 
     def mode_intro_keyboard(self):
         return [
             [Button.inline("ABC球模式介绍", data=b"intro_ball")],
-            [Button.inline("30算法杀组模式介绍", data=b"intro_kill")],
+            [Button.inline("4算法杀组模式介绍", data=b"intro_kill")],
             [Button.inline("特码与豹子介绍", data=b"intro_extra")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
@@ -1466,7 +1200,7 @@ class SystemOrchestrator:
                         all_bet_lines.append(f"{b_char}{d}/{int(single_bet)}")
             active_descriptions.append(f"ABC杀球(杀{u.abc_kill_count}码,倍投{multiplier:.1f}x)")
 
-        # 30算法杀组模式
+        # 4算法杀组模式
         kill_target_for_bet = None
         kill_confidence_for_bet = 0.5
         if "kill" in u.selected_modes and u.kill_enabled:
@@ -1491,7 +1225,7 @@ class SystemOrchestrator:
                 bet_combos = [c for c in COMBOS if c != kill_target]
                 for c in bet_combos:
                     all_bet_lines.append(f"{c}/{int(single_bet)}")
-                active_descriptions.append(f"30算法杀组(杀{kill_target},置信{confidence:.0%},倍投{multiplier:.1f}x)")
+                active_descriptions.append(f"4算法杀组(杀{kill_target},置信{confidence:.0%},倍投{multiplier:.1f}x)")
             except Exception as e:
                 logger.error(f"[用户 {u.user_id}] 杀组预测失败: {e}")
 
@@ -1544,7 +1278,7 @@ class SystemOrchestrator:
                 ]
                 if kill_target_for_bet:
                     notify_lines.extend([
-                        f"30算法杀组: `{kill_target_for_bet}`",
+                        f"4算法杀组: `{kill_target_for_bet}`",
                         f"置信度: `{kill_confidence_for_bet:.0%}`",
                     ])
                 notify_lines.extend([
@@ -1573,7 +1307,7 @@ class SystemOrchestrator:
                 f"• 绑定群组: `{len(u.groups)}` 个\n"
                 f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                 f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                f"• 30算法杀组: `{kill_status}`\n"
+                f"• 4算法杀组: `{kill_status}`\n"
                 f"• 报数播报: `{bc_status}`\n"
                 f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                 f"--------------------",
@@ -1636,7 +1370,7 @@ class SystemOrchestrator:
                 await event.answer("ABC球模式：针对开奖号码的前三位进行定位杀号。用户可多选A、B、C球，自定义杀码数量后系统自动随机杀掉对应数量的数字，并按独立金额与倍投设置自动投递剩余数字。中奖倍率9.99。", alert=True)
                 return
             if data == "intro_kill":
-                await event.answer("30算法杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
+                await event.answer("4算法杀组模式：集成天子、5Y、小枫、小盾4种预测算法，回测10期后选择胜率最高的算法，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
                 return
             if data == "intro_extra":
                 await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0/27、1/26）以及豹子。", alert=True)
@@ -1680,13 +1414,13 @@ class SystemOrchestrator:
                 return
 
             if data == "kill_settings":
-                await event.edit("30算法杀组模式设置", buttons=self.kill_settings_keyboard(u))
+                await event.edit("4算法杀组模式设置", buttons=self.kill_settings_keyboard(u))
                 return
 
             if data == "toggle_kill_enabled":
                 u.kill_enabled = not u.kill_enabled
                 u.save()
-                await event.edit("30算法杀组模式设置", buttons=self.kill_settings_keyboard(u))
+                await event.edit("4算法杀组模式设置", buttons=self.kill_settings_keyboard(u))
                 return
 
             if data == "set_kill_amount":
@@ -1738,7 +1472,7 @@ class SystemOrchestrator:
                     f"• 绑定群组: `{len(u.groups)}` 个\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                     f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                    f"• 30算法杀组: `{kill_status}`\n"
+                    f"• 4算法杀组: `{kill_status}`\n"
                     f"• 报数播报: `{bc_status}`\n"
                     f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                     f"--------------------",
@@ -2046,7 +1780,7 @@ class SystemOrchestrator:
 
                                 u.last_ball_kills = {}
 
-                            # 30算法杀组模式结算逻辑（杀中即亏损，杀错即盈利，赔率为 1:0.33 近似按投注3组中1组）
+                            # 4算法杀组模式结算逻辑（杀中即亏损，杀错即盈利，赔率为 1:0.33 近似按投注3组中1组）
                             if "kill" in u.selected_modes and u.kill_enabled and u.last_killed_group:
                                 if u.kill_last_settled_issue != data.issue_id:
                                     u.kill_last_settled_issue = data.issue_id
