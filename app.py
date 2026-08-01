@@ -14,6 +14,15 @@ import gradio as gr
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
+from algorithms import (
+    PiPredictor,
+    ComplexDualKillPredictor,
+    TianZiPredictor,
+    FiveYPredictor,
+    XiaoFengPredictor,
+    XiaoDunPredictor,
+)
+
 # ==================== 1. 核心常量与工具函数 ====================
 def get_type(s: int) -> str:
     return ('大' if s >= 14 else '小') + ('单' if s % 2 else '双')
@@ -910,11 +919,11 @@ class EnsembleVoter(BasePredictor):
                 pass
 
 
-# 全部 30 个算法类
-ALGO_CLASSES = [Markov3Predictor, Markov4Predictor, EWMAMultiPredictor, HoltWintersPredictor, BayesianPredictor, BOCDPredictor, KNNPredictor, RandomForestPredictor, GBDTPredictor, SVMPredictor, IsoForestPredictor, FFTPredictor, KalmanPredictor, ParticleFilterPredictor, NashPredictor, KellyPredictor, ReflexivityPredictor, MarketDepthPredictor, EvoGamePredictor, PiCyclePredictor, LyapunovPredictor, HurstPredictor, RecurrencePredictor, PoincarePredictor, StackingPredictor, MoEPredictor, BMAPredictor, ARCHPredictor, ARIMAPredictor, WaveletPredictor]
+# 全部 6 个算法类
+ALGO_CLASSES = [PiPredictor, ComplexDualKillPredictor, TianZiPredictor, FiveYPredictor, XiaoFengPredictor, XiaoDunPredictor]
 
 class KillGroupPredictor:
-    """基于 30 算法 EnsembleVoter 加权投票集成的杀组预测器"""
+    """基于 6 种算法历史杀组胜率选择器的杀组预测器"""
     def __init__(self):
         self.predictors = []
         for cls in ALGO_CLASSES:
@@ -922,31 +931,65 @@ class KillGroupPredictor:
                 self.predictors.append(cls())
             except Exception as e:
                 logger.warning(f"[杀组] 算法 {cls.__name__} 实例化失败，已跳过: {e}")
-        self.voter = EnsembleVoter(self.predictors) if self.predictors else None
         logger.info(f"杀组预测器已加载 {len(self.predictors)} 个算法引擎")
+
+    @staticmethod
+    def _get_kill(scores: dict) -> str:
+        return max(scores, key=scores.get)
+
+    def _backtest_win_rate(self, predictor, history: list) -> float:
+        """取最近 50 期，在最近 20 期上做滚动回测，返回杀组胜率"""
+        window = history[:50]
+        if len(window) < 20:
+            return 0.0
+        wins = 0
+        total = 0
+        for i in range(20):
+            train = window[i + 1:50]
+            actual = window[i]["size"] + window[i]["odd_even"]
+            try:
+                scores = predictor.predict(train)
+                predicted = self._get_kill(scores)
+            except Exception:
+                continue
+            total += 1
+            if predicted != actual:
+                wins += 1
+        return wins / total if total > 0 else 0.0
 
     def predict_kill(self, history: list) -> tuple[str, float]:
         """
         history: list of dict with keys: size, odd_even, total, nums, issue, dragon_tiger
         返回: (建议杀的组合, 置信度)
-        策略: 使用 30 算法合集包中的 EnsembleVoter 加权投票融合所有算法得分
+        策略: 使用最近 50 期数据，对 6 种算法在最近 20 期上做滚动回测，
+             选择杀组胜率最高的算法，返回其在当前窗口的预测结果。
         """
-        if not self.predictors or len(history) < 10 or self.voter is None:
+        if not self.predictors or len(history) < 10:
+            return "小单", 0.5
+
+        best_predictor = None
+        best_rate = -1.0
+        for p in self.predictors:
+            try:
+                rate = self._backtest_win_rate(p, history)
+                logger.info(f"[杀组回测] {getattr(p, 'name', p.__class__.__name__)} 杀组胜率 {rate:.2%}")
+                if rate > best_rate:
+                    best_rate = rate
+                    best_predictor = p
+            except Exception as e:
+                logger.warning(f"[杀组回测] 算法 {getattr(p, 'name', p.__class__.__name__)} 回测失败: {e}")
+
+        if best_predictor is None:
             return "小单", 0.5
 
         try:
-            scores = self.voter.predict(history)
+            scores = best_predictor.predict(history[:50])
+            best = self._get_kill(scores)
         except Exception:
             return "小单", 0.5
 
-        best = max(scores, key=scores.get)
-        # 置信度用最高分相对优势表示
-        sorted_scores = sorted(scores.values(), reverse=True)
-        confidence = 0.5
-        if len(sorted_scores) >= 2 and sum(scores.values()) > 0:
-            confidence = sorted_scores[0] / sum(scores.values()) * 2  # 归一化到相对优势
-            confidence = min(0.99, max(0.25, confidence))
-        logger.info(f"[杀组 EnsembleVoter] 30 算法加权投票 -> 杀 {best} (置信 {confidence:.0%})")
+        confidence = min(0.99, max(0.25, best_rate))
+        logger.info(f"[杀组选择器] 使用 {getattr(best_predictor, 'name', best_predictor.__class__.__name__)} -> 杀 {best} (胜率 {best_rate:.0%})")
         return best, confidence
 
 # 全局杀组预测器实例
@@ -1434,6 +1477,8 @@ class SystemOrchestrator:
             u.broadcast_history = u.broadcast_history[-20:]  # 保留最近20条
 
             msg = build_broadcast_message(u.broadcast_title, u.broadcast_history)
+            if u.custom_delay > 0:
+                await asyncio.sleep(u.custom_delay)
             await u.client.send_message(u.broadcast_channel, msg)
             u.broadcast_count += 1
             u.broadcast_sent_issues.append(data.issue_id)
