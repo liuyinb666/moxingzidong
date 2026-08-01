@@ -14,6 +14,31 @@ import gradio as gr
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
+# ==================== 1. 核心常量与工具函数 ====================
+def get_type(s: int) -> str:
+    return ('大' if s >= 14 else '小') + ('单' if s % 2 else '双')
+
+# 杀组四组合
+COMBOS = ["大单", "小单", "大双", "小双"]
+
+# ==================== 2. 风控管理系统 ====================
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+
+DATA_API_URL = "https://pc28.help/api/kj.json?nbr=100"
+SESSIONS_DIR = "telegram_sessions"
+USER_DATA_DIR = "user_data"
+
+# 北京时间 (UTC+8)，盈亏按北京时间每天 00:00 重置
+BEIJING_TZ = timezone(timedelta(hours=8))
+
+os.makedirs(SESSIONS_DIR, exist_ok=True)
+os.makedirs(USER_DATA_DIR, exist_ok=True)
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
+logger = logging.getLogger(__name__)
+
 # ==================== 内置 30 算法矩阵 + EnsembleVoter ====================
 
 """算法基类 - 统一接口"""
@@ -860,7 +885,7 @@ class EnsembleVoter(BasePredictor):
     def __init__(self, predictors: list, weights: list = None):
         self.predictors = predictors
         self.weights = weights or [1.0] * len(predictors)
-        self.accuracy_log = {p.name: [] for p in predictors}
+        self.accuracy_log = {getattr(p, 'name', p.__class__.__name__): [] for p in predictors}
 
     def predict(self, history: list) -> dict:
         scores = {"大单": 0, "大双": 0, "小单": 0, "小双": 0}
@@ -891,7 +916,12 @@ ALGO_CLASSES = [Markov3Predictor, Markov4Predictor, EWMAMultiPredictor, HoltWint
 class KillGroupPredictor:
     """基于 30 算法 EnsembleVoter 加权投票集成的杀组预测器"""
     def __init__(self):
-        self.predictors = [cls() for cls in ALGO_CLASSES]
+        self.predictors = []
+        for cls in ALGO_CLASSES:
+            try:
+                self.predictors.append(cls())
+            except Exception as e:
+                logger.warning(f"[杀组] 算法 {cls.__name__} 实例化失败，已跳过: {e}")
         self.voter = EnsembleVoter(self.predictors) if self.predictors else None
         logger.info(f"杀组预测器已加载 {len(self.predictors)} 个算法引擎")
 
