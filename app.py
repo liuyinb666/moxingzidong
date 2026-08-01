@@ -1329,7 +1329,11 @@ def build_broadcast_message(title: str, history_records: list, max_records: int 
 # ==================== 5. 系统中控与自动化调度中心 ====================
 class SystemOrchestrator:
     def __init__(self):
-        self.bot = TelegramClient("telegram_sessions/bot_master", API_ID, API_HASH)
+        if not API_ID or not API_HASH:
+            logger.warning("未配置 API_ID/API_HASH，Telegram Bot 功能不可用")
+            self.bot = None
+        else:
+            self.bot = TelegramClient("telegram_sessions/bot_master", API_ID, API_HASH)
         self.users = {}
         self.user_login_states = {}
         self.last_issue_id = None
@@ -2189,6 +2193,9 @@ class SystemOrchestrator:
             await asyncio.sleep(4)
 
     async def start(self):
+        if self.bot is None:
+            logger.warning("Bot 未初始化，跳过 Telegram 启动，仅保留 Gradio 控制台")
+            return
         await self.bot.start(bot_token=BOT_TOKEN)
         await self.register_handlers()
         await self.load_existing_users()
@@ -2206,14 +2213,14 @@ def start_bot_thread():
     except Exception as e:
         logger.error(f"Bot 运行异常: {e}")
 
-threading.Thread(target=start_bot_thread, daemon=True).start()
-
-with gr.Blocks(title="PC28量化智能挂机系统", theme=gr.themes.Soft()) as demo:
+with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已集成30种算法投票杀组模式（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）与同款报数播报功能。ABC杀球模式支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
+    gr.Markdown("已集成6种算法动态回测选优杀组模式（π算法、双杀组、天子、5Y、小枫、小盾）与同款报数播报功能。ABC杀球模式支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
 
 if __name__ == "__main__":
+    # 仅在直接运行时才启动 Telegram Bot 线程，避免部署平台导入模块时触发
+    threading.Thread(target=start_bot_thread, daemon=True).start()
     port = int(os.getenv("PORT", "7860"))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    demo.launch(server_name="0.0.0.0", server_port=port, theme=gr.themes.Soft())
