@@ -1242,42 +1242,37 @@ class SystemOrchestrator:
 
     def _should_skip_bet(self, results: list) -> tuple:
         """
-        基于最近20期输赢记录判断是否跳过下注
+        基于最近20期输赢记录判断是否跳过下注（已放宽，避免一直跳过）
         results: list of int, 1=中, 0=挂, 最新在末尾
         返回: (是否跳过, 原因)
         """
         n = len(results)
-        if n < 2:
+        if n < 3:
             return False, ""
 
-        # 1. 连续亏损检测
-        if n >= 2 and results[-1] == 0 and results[-2] == 0:
-            return True, "最近2期连挂"
-        if n >= 3 and results[-1] == 0 and results[-2] == 0 and results[-3] == 0:
+        # 1. 连续亏损检测（至少3期连挂才跳过）
+        if results[-1] == 0 and results[-2] == 0 and results[-3] == 0:
             return True, "最近3期连挂"
 
-        # 2. 近期胜率过低
-        if n >= 5 and sum(results[-5:]) <= 1:
-            return True, "近5期只中1期"
-        if n >= 10 and sum(results[-10:]) <= 3:
-            return True, "近10期只中3期"
+        # 2. 近期胜率过低（放宽阈值）
+        if n >= 5 and sum(results[-5:]) == 0:
+            return True, "近5期全挂"
+        if n >= 10 and sum(results[-10:]) <= 1:
+            return True, "近10期只中1期"
 
-        # 3. 特定形态（尾部匹配）
+        # 3. 特定形态（只保留较强烈的尾部形态）
         patterns = [
             ([0, 0, 1], "挂挂中"),
             ([1, 0, 0], "中挂挂"),
             ([0, 1, 0], "挂中挂"),
-            ([1, 1, 0, 0], "中中挂挂"),
-            ([0, 1, 1, 0], "挂中中挂"),
-            ([1, 0, 1, 0], "中挂中挂"),
         ]
         for pat, name in patterns:
             if len(results) >= len(pat) and results[-len(pat):] == pat:
                 return True, f"形态[{name}]"
 
         # 4. 近20期整体弱势
-        if n >= 20 and sum(results[-20:]) <= 6:
-            return True, "近20期只中6期以下"
+        if n >= 20 and sum(results[-20:]) <= 5:
+            return True, "近20期只中5期以下"
 
         return False, ""
 
