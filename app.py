@@ -854,6 +854,10 @@ class UserState:
         self.broadcast_sent_issues = []   # 已播报期号
         self.broadcast_last_issue = ""    # 上一次处理的期号
 
+        # 输赢规律判断下注总开关
+        self.enable_skip_bet_by_pattern = False
+        self.bet_results = []             # 最近20期输赢结果，1=中，0=挂
+
         self.load()
 
     def load(self):
@@ -900,6 +904,9 @@ class UserState:
                         self.extra_bet_amounts = data.get("extra_bet_amounts", {"0_27": 100.0, "1_26": 100.0, "baozi": 100.0})
                         self.extra_special_numbers = data.get("extra_special_numbers", [])
                         self.extra_bauzi = data.get("extra_bauzi", False)
+                        # 输赢规律判断
+                        self.enable_skip_bet_by_pattern = data.get("enable_skip_bet_by_pattern", False)
+                        self.bet_results = data.get("bet_results", [])
                         if "risk_mgr" in data:
                             self.risk_mgr = RiskManager.from_dict(data["risk_mgr"])
                 except Exception as e:
@@ -937,6 +944,8 @@ class UserState:
                         "extra_bet_amounts": self.extra_bet_amounts,
                         "extra_special_numbers": self.extra_special_numbers,
                         "extra_bauzi": self.extra_bauzi,
+                        "enable_skip_bet_by_pattern": self.enable_skip_bet_by_pattern,
+                        "bet_results": self.bet_results[-20:],
                         "risk_mgr": self.risk_mgr.to_dict()
                     }, f, ensure_ascii=False)
             except Exception as e:
@@ -1086,6 +1095,7 @@ class SystemOrchestrator:
         return [
             [Button.inline(f"状态: {status}", data=b"noop"), Button.inline(login, data=b"login")],
             [Button.inline("🚀 启动挂机", data=b"start"), Button.inline("⏹ 暂停挂机", data=b"stop")],
+            [Button.inline(f"{'✅' if u_state.enable_skip_bet_by_pattern else '⬜'} 判断输赢规律下注", data=b"toggle_skip_pattern")],
             [Button.inline("⚙️ 模式选择", data=b"select_mode")],
             [Button.inline("🎯 杀组设置", data=b"kill_settings"), Button.inline("📢 报数设置", data=b"broadcast_settings")],
             [Button.inline("💎 附加特码/豹子配置", data=b"extra_config")],
@@ -1230,9 +1240,68 @@ class SystemOrchestrator:
         except Exception as e:
             logger.error(f"[用户 {u.user_id}] 播报失败: {e}")
 
+    def _should_skip_bet(self, results: list) -> tuple:
+        """
+        基于最近20期输赢记录判断是否跳过下注
+        results: list of int, 1=中, 0=挂, 最新在末尾
+        返回: (是否跳过, 原因)
+        """
+        n = len(results)
+        if n < 2:
+            return False, ""
+
+        # 1. 连续亏损检测
+        if n >= 2 and results[-1] == 0 and results[-2] == 0:
+            return True, "最近2期连挂"
+        if n >= 3 and results[-1] == 0 and results[-2] == 0 and results[-3] == 0:
+            return True, "最近3期连挂"
+
+        # 2. 近期胜率过低
+        if n >= 5 and sum(results[-5:]) <= 1:
+            return True, "近5期只中1期"
+        if n >= 10 and sum(results[-10:]) <= 3:
+            return True, "近10期只中3期"
+
+        # 3. 特定形态（尾部匹配）
+        patterns = [
+            ([0, 0, 1], "挂挂中"),
+            ([1, 0, 0], "中挂挂"),
+            ([0, 1, 0], "挂中挂"),
+            ([1, 1, 0, 0], "中中挂挂"),
+            ([0, 1, 1, 0], "挂中中挂"),
+            ([1, 0, 1, 0], "中挂中挂"),
+        ]
+        for pat, name in patterns:
+            if len(results) >= len(pat) and results[-len(pat):] == pat:
+                return True, f"形态[{name}]"
+
+        # 4. 近20期整体弱势
+        if n >= 20 and sum(results[-20:]) <= 6:
+            return True, "近20期只中6期以下"
+
+        return False, ""
+
     async def handle_new_issue_bet(self, u: UserState, issue_id: str, latest_market_data: MarketData = None):
         if u.last_betted_issue == issue_id:
             return
+
+        # ----- 输赢规律下注判断（总开关） -----
+        if u.enable_skip_bet_by_pattern:
+            should_skip, reason = self._should_skip_bet(u.bet_results)
+            if should_skip:
+                logger.info(f"[用户 {u.user_id}] 期号 {issue_id} 跳过下注: {reason}")
+                try:
+                    await self.bot.send_message(
+                        u.user_id,
+                        f"【下注跳过通知】\n"
+                        f"期号: `{issue_id}`\n"
+                        f"原因: `{reason}`\n"
+                        f"近期输赢: `{''.join(['中' if x else '挂' for x in u.bet_results[-10:]])}`"
+                    )
+                except Exception:
+                    pass
+                return
+        # ----------------------------------------
 
         can_bet, reason = u.risk_mgr.can_bet()
         if not can_bet:
@@ -1389,6 +1458,31 @@ class SystemOrchestrator:
 
             if data == "noop":
                 await event.answer()
+                return
+
+            if data == "toggle_skip_pattern":
+                u.enable_skip_bet_by_pattern = not u.enable_skip_bet_by_pattern
+                u.save()
+                can_bet, reason = u.risk_mgr.can_bet()
+                status_text = "运行中" if u.is_active else "已停止"
+                if not can_bet:
+                    status_text += f" (风控: {reason})"
+                kill_status = "启用" if ("kill" in u.selected_modes and u.kill_enabled) else "未启用"
+                bc_status = "开启" if u.broadcast_enabled else "关闭"
+                await event.edit(
+                    f"主控制面板\n"
+                    f"--------------------\n"
+                    f"• 挂机状态: `{status_text}`\n"
+                    f"• 绑定群组: `{len(u.groups)}` 个\n"
+                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
+                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• 30算法杀组: `{kill_status}`\n"
+                    f"• 报数播报: `{bc_status}`\n"
+                    f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                    f"• 输赢规律判断: `{'开启' if u.enable_skip_bet_by_pattern else '关闭'}`\n"
+                    f"--------------------",
+                    buttons=self.main_keyboard(u)
+                )
                 return
 
             if data == "select_mode":
@@ -1808,11 +1902,14 @@ class SystemOrchestrator:
                     self.last_issue_id = data.issue_id
                     for uid, u in self.users.items():
                         if u.is_logged_in:
+                            # 初始化本期各模式盈亏
+                            total_abc_pnl = 0.0
+                            kill_pnl = 0.0
+
                             # ABC球模式结算逻辑（中奖倍率 9.99，按整体盈亏判定输赢）
                             if "ball" in u.selected_modes and u.last_ball_kills:
                                 nums = [int(d) for d in data.number_str if d.isdigit()]
                                 ball_index_map = {"a": 0, "b": 1, "c": 2}
-                                total_abc_pnl = 0.0
                                 has_any_bet = False
 
                                 for b_char in u.selected_balls:
@@ -1886,6 +1983,16 @@ class SystemOrchestrator:
                                         )
                                     except:
                                         pass
+
+                            # ===== 记录本期整体输赢（用于输赢规律判断） =====
+                            total_period_pnl = total_abc_pnl + kill_pnl
+                            if total_period_pnl > 0:
+                                u.bet_results.append(1)   # 中
+                            else:
+                                u.bet_results.append(0)   # 挂
+                            if len(u.bet_results) > 20:
+                                u.bet_results.pop(0)
+                            # =============================================
 
                             u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
                             if len(u.history) > 120:
