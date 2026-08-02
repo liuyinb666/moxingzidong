@@ -2,6 +2,7 @@ import os
 import sys
 import re
 import json
+import math
 import asyncio
 import logging
 import threading
@@ -21,6 +22,39 @@ from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, P
 # ==================== 1. 核心常量与工具函数 ====================
 def get_type(s: int) -> str:
     return ('大' if s >= 14 else '小') + ('单' if s % 2 else '双')
+
+
+def compute_sha_a_kills(nums: list, total: int) -> list:
+    """
+    杀a球规则：根据最新一期开奖号码生成下一期 5 个杀号数字。
+    计算方式：total / abc * e，取小数部分，从小数点后第 2 位开始提取不重复数字，直到 5 个。
+    """
+    if len(nums) < 3:
+        return random.sample(range(10), 5)
+    abc = nums[0] * 100 + nums[1] * 10 + nums[2]
+    if abc == 0:
+        abc = 1
+    value = (total / abc) * math.e
+    frac = value - int(value)
+    # 保留足够多的小数位
+    frac_str = f"{frac:.20f}".replace("0.", "")
+    kills = []
+    # 从小数点后第 2 位开始（索引 1）
+    for ch in frac_str[1:]:
+        d = int(ch)
+        if d not in kills:
+            kills.append(d)
+        if len(kills) >= 5:
+            break
+    if len(kills) < 5:
+        # 兜底：补足不重复数字
+        for d in range(10):
+            if d not in kills:
+                kills.append(d)
+            if len(kills) >= 5:
+                break
+    return kills
+
 
 # 杀组四组合
 COMBOS = ["大单", "小单", "大双", "小双"]
@@ -665,7 +699,7 @@ class KillGroupPredictor:
         history: list of dict with keys: size, odd_even, total, nums, issue, dragon_tiger
         返回: (建议杀的组合, 置信度)
         策略: 使用最近 50 期数据，对 6 种算法在最近 20 期上做滚动回测，
-             选择杀组胜率最高的算法，返回其在当前窗口的预测结果。
+             选择杀组胜率最高的单一算法，返回其在当前窗口的预测结果。
         """
         if not self.predictors or len(history) < 10:
             return "小单", 0.5
@@ -785,7 +819,7 @@ class UserState:
 
         # ABC独立设置
         self.ball_bet_amount = 100.0
-        self.abc_kill_count = 1           # 每个球杀码数量（1-9）
+        self.abc_kill_count = 5           # 杀a球默认杀5码
         self.abc_martingale_multiplier = 2.0  # ABC倍投倍数
         self.abc_consecutive_losses = 0   # ABC连败次数
 
@@ -1213,19 +1247,25 @@ class SystemOrchestrator:
         # 重置上期杀球记录，准备生成本期
         u.last_ball_kills = {}
 
-        # ABC杀球模式（支持自定义杀码数量与倍投）
+        # ABC杀球模式（杀a球规则，默认杀5码）
         if "ball" in u.selected_modes:
             multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
             single_bet = u.ball_bet_amount * multiplier
 
+            # 基于最新一期开奖数据计算杀a球5码
+            latest = u.history[0] if u.history else None
+            if latest and len(latest.get("nums", [])) >= 3:
+                killed_digits = compute_sha_a_kills(latest["nums"], latest.get("sum", sum(latest["nums"])))
+            else:
+                killed_digits = random.sample(range(10), 5)
+            u.abc_kill_count = 5  # 固定使用杀a球5码规则
+
             for b_char in u.selected_balls:
-                # 随机杀 abc_kill_count 个不同数字
-                killed_digits = random.sample(range(10), u.abc_kill_count)
                 u.last_ball_kills[b_char] = killed_digits
                 for d in range(10):
                     if d not in killed_digits:
                         all_bet_lines.append(f"{b_char}{d}/{int(single_bet)}")
-            active_descriptions.append(f"ABC杀球(杀{u.abc_kill_count}码,倍投{multiplier:.1f}x)")
+            active_descriptions.append(f"ABC杀球(杀a球{killed_digits},倍投{multiplier:.1f}x)")
 
         # 30算法杀组模式
         kill_target_for_bet = None
@@ -1394,7 +1434,7 @@ class SystemOrchestrator:
                 return
 
             if data == "intro_ball":
-                await event.answer("ABC球模式：针对开奖号码的前三位进行定位杀号。用户可多选A、B、C球，自定义杀码数量后系统自动随机杀掉对应数量的数字，并按独立金额与倍投设置自动投递剩余数字。中奖倍率9.99。", alert=True)
+                await event.answer("杀a球模式：根据最新一期开奖号码（a+b+c=和值），按 和值÷abc×e 取小数部分，从小数点后第2位起提取5个不重复数字作为杀码。A/B/C球共用同一组杀码，系统自动投递剩余数字。中奖倍率9.99。", alert=True)
                 return
             if data == "intro_kill":
                 await event.answer("30算法杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
