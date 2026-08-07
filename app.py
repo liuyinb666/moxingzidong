@@ -735,409 +735,83 @@ class KillGroupPredictor:
 kill_group_predictor = KillGroupPredictor()
 
 
-# ==================== ABC杀码（改进版 v10.2 — 自适应集成，移植自主文件） ====================
-KILL_MODELS = {}
-
-# ---------- 预测器工厂（10种策略） ----------
-def _make_freq_pred(window, mode):
-    """简单频率预测：mode=HOT杀热号, COLD杀冷号, MID杀中频号"""
-    def pred(h):
-        if len(h) < window: return random.randint(0, 9)
-        cnt = Counter(h[:window])
-        if mode == "HOT": return cnt.most_common(1)[0][0]
-        elif mode == "COLD": return min(range(10), key=lambda x: cnt.get(x, 0))
-        else:
-            ranked = sorted(range(10), key=lambda x: cnt.get(x, 0))
-            return ranked[len(ranked)//2]
-    return pred
-
-def _make_markov_pred(order, depth):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        if len(s) < order + 1: return random.randint(0, 9)
-        trans = Counter()
-        for i in range(order, len(s)):
-            trans[(tuple(s[i-order:i]), s[i])] += 1
-        cur = tuple(s[-order:])
-        votes = Counter()
-        for (k, nxt), c in trans.items():
-            if k == cur: votes[nxt] += c
-        return votes.most_common(1)[0][0] if votes else random.randint(0, 9)
-    return pred
-
-def _make_pattern_pred(plen, depth):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        if len(s) < plen + 1: return random.randint(0, 9)
-        pat = tuple(s[-plen:])
-        out = Counter()
-        for i in range(len(s) - plen):
-            if tuple(s[i:i+plen]) == pat: out[s[i+plen]] += 1
-        return out.most_common(1)[0][0] if out else random.randint(0, 9)
-    return pred
-
-def _make_streak_pred(thresh, depth):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        streak = 1
-        for v in s[1:]:
-            if v == s[0]: streak += 1
-            else: break
-        if streak >= thresh:
-            return min(range(10), key=lambda x: Counter(s).get(x, 0))
-        return s[0]
-    return pred
-
-def _make_weighted_freq_pred(depth, bias, decay):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        scores = {n: 0.0 for n in range(10)}
-        for i, x in enumerate(s):
-            scores[x] += decay ** (len(s) - 1 - i)
-        return max(scores, key=scores.get) if bias == "HOT" else min(scores, key=scores.get)
-    return pred
-
-def _make_gap_pred(depth, step):
-    def pred(h):
-        if len(h) < depth + step: return random.randint(0, 9)
-        s = h[:depth + step]
-        diffs = Counter()
-        for i in range(len(s) - step):
-            diffs[(s[i] - s[i+step]) % 10] += 1
-        return (s[0] - diffs.most_common(1)[0][0]) % 10 if diffs else random.randint(0, 9)
-    return pred
-
-def _make_osc_pred(depth):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        if len(s) < 3: return random.randint(0, 9)
-        diffs = [(s[i] - s[i+1]) % 10 for i in range(min(5, len(s)-1))]
-        if diffs:
-            return (s[0] - round(sum(diffs)/len(diffs))) % 10
-        return random.randint(0, 9)
-    return pred
-
-def _make_cycle_pred(cycle_len):
-    def pred(h):
-        if len(h) < cycle_len + 1: return random.randint(0, 9)
-        pos = len(h) % cycle_len
-        same_pos = [h[i] for i in range(len(h)) if i % cycle_len == pos]
-        return Counter(same_pos).most_common(1)[0][0] if same_pos else random.randint(0, 9)
-    return pred
-
-def _make_diff_direction_pred(depth):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        if len(s) < 4: return random.randint(0, 9)
-        diffs = [(s[i] - s[i+1]) % 10 for i in range(min(8, len(s)-1))]
-        if not diffs: return random.randint(0, 9)
-        recent = diffs[:4]
-        older = diffs[4:8] if len(diffs) >= 8 else diffs[4:]
-        if older:
-            avg_recent = sum(recent) / len(recent)
-            avg_older = sum(older) / len(older)
-            if abs(avg_recent - avg_older) > 2:
-                return (s[0] + round(avg_recent)) % 10
-            else:
-                return (s[0] + random.choice([1, 9])) % 10
-        return (s[0] + random.choice(diffs)) % 10
-    return pred
-
-def _make_simple_formula_pred(a, b, c, depth):
-    def pred(h):
-        if len(h) < depth: return random.randint(0, 9)
-        s = h[:depth]
-        avg = sum(s[:10]) / min(10, len(s[:10]))
-        return int((a * s[0] + b * avg + c)) % 10
-    return pred
-
-# ---------- 构建模型池（每球200个，10种策略） ----------
-def _build_abc_models():
-    global KILL_MODELS
-    KILL_MODELS.clear()
-    rng = random.Random(random.randint(0, 2**32 - 1))
-    sid = 0
-    for ball in ["A", "B", "C"]:
-        for i in range(30):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_freq_pred(rng.randint(5, 30), rng.choice(["HOT", "COLD", "MID"])),
-                "ball": ball, "strategy": "freq"
-            }
-        for i in range(30):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_markov_pred(rng.randint(1, 4), rng.randint(10, 30)),
-                "ball": ball, "strategy": "markov"
-            }
-        for i in range(25):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_pattern_pred(rng.randint(2, 5), rng.randint(10, 30)),
-                "ball": ball, "strategy": "pattern"
-            }
-        for i in range(15):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_streak_pred(rng.randint(2, 5), rng.randint(10, 25)),
-                "ball": ball, "strategy": "streak"
-            }
-        for i in range(25):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_weighted_freq_pred(rng.randint(10, 30), rng.choice(["HOT", "COLD"]), rng.uniform(0.8, 0.98)),
-                "ball": ball, "strategy": "weighted"
-            }
-        for i in range(20):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_gap_pred(rng.randint(10, 25), rng.randint(1, 5)),
-                "ball": ball, "strategy": "gap"
-            }
-        for i in range(15):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_osc_pred(rng.randint(8, 20)),
-                "ball": ball, "strategy": "oscillation"
-            }
-        for i in range(15):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_cycle_pred(rng.randint(3, 15)),
-                "ball": ball, "strategy": "cycle"
-            }
-        for i in range(10):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_diff_direction_pred(rng.randint(10, 25)),
-                "ball": ball, "strategy": "diff"
-            }
-        for i in range(15):
-            sid += 1
-            KILL_MODELS[f"M{sid:04d}"] = {
-                "func": _make_simple_formula_pred(rng.randint(1, 9), rng.randint(1, 5), rng.randint(0, 9), rng.randint(10, 25)),
-                "ball": ball, "strategy": "formula"
-            }
-    logger.info(f"ABC杀码模型池构建完成: {len(KILL_MODELS)} 个模型 (10种策略)")
-
-class HighWinRateManager:
-    """ABC杀码管理器 v10.2 — 自适应集成
-    1. 短期(10期)+长期(60期)双窗口权重，短期权重70%
-    2. 逆反模式：近期准确率<42%时自动翻转预测
-    3. 跨期记忆：追踪每球最近N期实际命中情况
-    4. 自适应杀码数：低置信度时减少杀码
-    5. 模型精选：只使用短期表现 Top-40% 的模型投票
+# ==================== ABC 7码动态排除预测器（基于上期开奖+和值尾数） ====================
+class ABC7CodePredictor:
+    """7码动态排除预测器
+    规则：杀掉上期对应球、相邻球、和值尾数，去重后不足3个则按规则补位。
     """
 
-    SHORT_WINDOW = 10
-    LONG_WINDOW = 60
-    SHORT_WEIGHT = 0.7
-    INVERSE_THRESHOLD = 0.42
-
-    # 跨期记忆: {ball_type: {"recent_results": [True/False, ...], "consec_losses": int}}
-    _memory = {}
-
-    @classmethod
-    def _get_memory(cls, ball_type):
-        if ball_type not in cls._memory:
-            cls._memory[ball_type] = {"recent_results": [], "consec_losses": 0}
-        return cls._memory[ball_type]
-
-    @classmethod
-    def record_result(cls, ball_type, kill_nums, actual_num):
-        """记录本期预测结果，用于跨期自适应"""
-        mem = cls._get_memory(ball_type)
-        hit = actual_num in kill_nums
-        mem["recent_results"].append(hit)
-        if len(mem["recent_results"]) > 20:
-            mem["recent_results"] = mem["recent_results"][-20:]
-        if not hit:
-            mem["consec_losses"] += 1
-        else:
-            mem["consec_losses"] = 0
-
-    @classmethod
-    def _recent_accuracy(cls, ball_type):
-        mem = cls._get_memory(ball_type)
-        results = mem["recent_results"]
-        if not results:
-            return 0.5
-        return sum(results) / len(results)
-
     @staticmethod
-    def _history_to_ball(history, ball_type):
-        """把 app.py 的 history 格式转换为该球位的数值列表（最新在前）"""
-        bi = {"A": 0, "B": 1, "C": 2}[ball_type]
-        return [item["nums"][bi] for item in history if "nums" in item and len(item.get("nums", [])) > bi]
+    def _get_kill_nums(history, ball_type):
+        if not history or "nums" not in history[0] or len(history[0].get("nums", [])) < 3:
+            return [0, 1, 2]  # 数据不足时默认杀3个
 
-    @staticmethod
-    def get_strict_prediction(history, ball_type, kill_count=5):
-        bh = HighWinRateManager._history_to_ball(history, ball_type)
-        if not bh:
-            return {"kill_nums": list(range(max(1, min(9, kill_count)))), "status": "数据不足"}
+        latest = history[0]
+        a, b, c = latest["nums"][0], latest["nums"][1], latest["nums"][2]
+        s = latest.get("sum", a + b + c)
+        d = s % 10
 
-        kill_count = max(1, min(9, int(kill_count or 5)))
-        models = {m: i for m, i in KILL_MODELS.items() if i["ball"] == ball_type}
+        # 各球基础杀号与补位规则
+        if ball_type == "A":
+            kills = {a, b, d}
+            first_supp = c
+            second_supp = (a + b) % 10
+        elif ball_type == "B":
+            kills = {b, c, d}
+            first_supp = a
+            second_supp = (b + c) % 10
+        else:  # C
+            kills = {c, a, d}
+            first_supp = b
+            second_supp = (c + a) % 10
 
-        short_backtest = min(HighWinRateManager.SHORT_WINDOW, len(bh) - 1)
-        long_backtest = min(HighWinRateManager.LONG_WINDOW, len(bh) - 1)
+        # 去重后不足3个，依次补位
+        if len(kills) < 3:
+            if first_supp not in kills:
+                kills.add(first_supp)
+        if len(kills) < 3:
+            if second_supp not in kills:
+                kills.add(second_supp)
+        if len(kills) < 3:
+            if 9 not in kills:
+                kills.add(9)
+            elif 0 not in kills:
+                kills.add(0)
+        # 兜底：确保恰好3个杀号
+        for n in range(10):
+            if len(kills) >= 3:
+                break
+            kills.add(n)
 
-        model_stats = {}
-        for mid, info in models.items():
-            s_correct = 0
-            for i in range(short_backtest):
-                if i >= len(bh) - 1: break
-                try:
-                    if info["func"](bh[i+1:]) != bh[i]:
-                        s_correct += 1
-                except: continue
-            short_acc = s_correct / short_backtest if short_backtest > 0 else 0.5
+        return sorted(kills)
 
-            l_correct = 0
-            for i in range(long_backtest):
-                if i >= len(bh) - 1: break
-                try:
-                    if info["func"](bh[i+1:]) != bh[i]:
-                        l_correct += 1
-                except: continue
-            long_acc = l_correct / long_backtest if long_backtest > 0 else 0.5
-
-            try:
-                cur_pred = info["func"](bh)
-            except:
-                cur_pred = random.randint(0, 9)
-
-            model_stats[mid] = {
-                "short_acc": short_acc,
-                "long_acc": long_acc,
-                "combo": HighWinRateManager.SHORT_WEIGHT * short_acc + (1 - HighWinRateManager.SHORT_WEIGHT) * long_acc,
-                "pred": cur_pred,
-                "strategy": info.get("strategy", "unknown")
-            }
-
-        sorted_models = sorted(model_stats.items(), key=lambda x: x[1]["combo"], reverse=True)
-        top_n = max(20, len(sorted_models) * 2 // 5)
-        elite = sorted_models[:top_n]
-
-        raw_kill_scores = {n: 0.0 for n in range(10)}
-        for mid, stats in elite:
-            w = stats["combo"]
-            raw_kill_scores[stats["pred"]] += w
-
-        max_score = max(raw_kill_scores.values()) or 1.0
-        kill_scores = {n: round(s / max_score, 3) for n, s in raw_kill_scores.items()}
-        sorted_kills = sorted(kill_scores.items(), key=lambda x: x[1], reverse=True)
-        kill_nums = sorted([n for n, s in sorted_kills[:kill_count]])
-
-        recent_acc = HighWinRateManager._recent_accuracy(ball_type)
-        mem = HighWinRateManager._get_memory(ball_type)
-        consec = mem["consec_losses"]
-
-        should_inverse = (recent_acc < HighWinRateManager.INVERSE_THRESHOLD and len(mem["recent_results"]) >= 5) or consec >= 3
-
-        if should_inverse:
-            inverse_kills = sorted([n for n, s in sorted_kills[-kill_count:]])
-            if set(inverse_kills) != set(kill_nums):
-                kill_nums = inverse_kills
-            else:
-                all_nums = list(range(10))
-                random.shuffle(all_nums)
-                kill_nums = sorted(all_nums[:kill_count])
-
-        top_k = [s for n, s in sorted_kills[:kill_count]]
-        rest = [s for n, s in sorted_kills[kill_count:]]
-        avg_top = sum(top_k) / len(top_k) if top_k else 0
-        avg_rest = sum(rest) / len(rest) if rest else 0
-        separation = max(0, avg_top - avg_rest)
-
-        used_strategies = set()
-        for n in kill_nums:
-            for mid, stats in elite:
-                if stats["pred"] == n:
-                    used_strategies.add(stats["strategy"])
-        strategy_count = len(used_strategies)
-        diversity_bonus = min(strategy_count / 7.0, 1.0)
-        confidence = kill_scores.get(kill_nums[0], 0) * 0.5 + separation * 0.3 + diversity_bonus * 0.2
-        if should_inverse:
-            confidence = confidence * 0.7
-
-        if should_inverse: status = "逆反模式"
-        elif confidence >= 0.85: status = "信心充足"
-        elif confidence >= 0.70: status = "较为可靠"
-        elif confidence >= 0.55: status = "谨慎参考"
-        else: status = "盘面混乱"
-
+    @classmethod
+    def get_all_predictions(cls, history, balls=None, kill_count=None):
+        if balls is None:
+            balls = ["A", "B", "C"]
         return {
-            "model_id": f"Ensemble({len(elite)}elite/{len(models)}total)",
-            "win_rate": round(kill_scores.get(kill_nums[0], 0), 3),
-            "kill_num": kill_nums[0] if kill_nums else 0,
-            "status": status,
-            "bet_numbers": [n for n in range(10) if n not in kill_nums],
-            "kill_nums": kill_nums,
-            "confidence": round(confidence, 3),
-            "strategy_count": strategy_count,
-            "strategies_used": list(used_strategies),
-            "kill_scores": kill_scores,
-            "multi_kill_accuracy": round(kill_scores.get(kill_nums[0], 0), 3),
-            "separation": round(separation, 3),
-            "inverse": should_inverse,
-            "consec_losses": consec,
-            "recent_accuracy": round(recent_acc, 3)
+            b: {
+                "kill_nums": cls._get_kill_nums(history, b),
+                "bet_numbers": [n for n in range(10) if n not in cls._get_kill_nums(history, b)],
+                "status": "动态排除"
+            }
+            for b in balls
         }
 
     @classmethod
-    def get_all_predictions(cls, h, balls=None, kill_count=None):
-        """获取所有球的预测结果。kill_count 支持 int 或 'A5,B3,C3' 字符串"""
-        if balls is None:
-            balls = ["A", "B", "C"]
-        if kill_count is None:
-            kill_map = {"A": 5, "B": 5, "C": 5}
-        elif isinstance(kill_count, (int, float)):
-            kc = int(kill_count)
-            kill_map = {"A": kc, "B": kc, "C": kc}
-        elif isinstance(kill_count, str):
-            kill_map = cls._parse_kill_count_str(kill_count)
-        elif isinstance(kill_count, dict):
-            kill_map = {b: max(1, min(9, int(kill_count.get(b, 5)))) for b in ["A", "B", "C"]}
-        else:
-            kill_map = {"A": 5, "B": 5, "C": 5}
-        return {b: cls.get_strict_prediction(h, b, kill_map.get(b, 5)) for b in balls}
-
-    @staticmethod
-    def _parse_kill_count_str(kc_str):
-        """解析 'A5,B3,C3' 或 'A5' 格式的杀码数字符串"""
-        result = {"A": 5, "B": 5, "C": 5}
-        try:
-            for part in str(kc_str).split(","):
-                part = part.strip().upper()
-                if not part:
-                    continue
-                ball = part[0]
-                if ball in ("A", "B", "C"):
-                    num = int(part[1:])
-                    result[ball] = max(1, min(9, num))
-        except (ValueError, IndexError):
-            pass
-        return result
+    def record_result(cls, ball_type, kill_nums, actual_num):
+        # 本规则为纯动态映射，无需跨期记忆
+        pass
 
     @classmethod
     def regenerate_abc_models(cls, history=None):
-        """重新生成ABC杀码模型（与杀组模型同步刷新）"""
-        _build_abc_models()
-        cls._memory.clear()
-        total = len(KILL_MODELS)
-        logger.info(f"ABC杀码模型已重新生成！模型总数: {total} (10种策略), 跨期记忆已清空")
-        return total
+        # 保持接口兼容，无需重新生成模型
+        logger.info("ABC 7码动态排除预测器无需重新生成模型")
+        return 0
 
 
-_build_abc_models()
-abc_manager = HighWinRateManager()
+abc_manager = ABC7CodePredictor()
+
 
 
 
@@ -1659,17 +1333,16 @@ class SystemOrchestrator:
         u.last_killed_group = ""
 
         # ========== 1. 生成所有预测（ABC球 + 杀组） ==========
-        # ABC杀球模式：使用自适应集成模型（移植自主文件 v10.2）
+        # ABC杀球模式：使用7码动态排除预测器（杀上期号码+和值尾数）
         abc_multiplier = 1.0
         abc_pred_info = {}
         if "ball" in u.selected_modes:
             abc_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
-            count = max(1, min(9, u.abc_kill_count))
+            count = 3  # 7码投注固定杀3个
             try:
                 preds = abc_manager.get_all_predictions(
                     u.history,
-                    balls=[b_char.upper() for b_char in u.selected_balls],
-                    kill_count=count
+                    balls=[b_char.upper() for b_char in u.selected_balls]
                 )
                 for b_char in u.selected_balls:
                     pred_info = preds.get(b_char.upper(), {})
@@ -1678,9 +1351,9 @@ class SystemOrchestrator:
                         kill_nums = random.sample(range(10), count)
                     u.last_ball_kills[b_char] = kill_nums
                     abc_pred_info[b_char] = pred_info
-                active_descriptions.append(f"ABC杀球(自适应集成杀{count}码,倍投{abc_multiplier:.1f}x)")
+                active_descriptions.append(f"ABC杀球(7码动态排除杀{count}码,倍投{abc_multiplier:.1f}x)")
             except Exception as e:
-                logger.error(f"[用户 {u.user_id}] ABC自适应集成预测失败: {e}")
+                logger.error(f"[用户 {u.user_id}] ABC7码动态排除预测失败: {e}")
 
         # 30算法杀组模式
         kill_target_for_bet = None
@@ -2265,7 +1938,7 @@ class SystemOrchestrator:
                                             else:
                                                 total_abc_pnl -= cost
                                                 logger.info(f"[用户 {uid}] ABC球 {b_char.upper()}球 未中: 开奖{actual_digit} 在杀码{killed_list}, 亏损{cost:.2f}")
-                                            # 更新ABC自适应集成模型的跨期记忆
+                                            # 记录ABC结果（新7码预测器无需跨期记忆，保留接口兼容）
                                             try:
                                                 abc_manager.record_result(b_char.upper(), killed_list, actual_digit)
                                             except Exception as e:
@@ -2283,7 +1956,7 @@ class SystemOrchestrator:
 
                                 u.last_ball_kills = {}
 
-                            # 30算法杀组模式结算逻辑（杀中即亏损，杀错即盈利，赔率为 1:0.33 近似按投注3组中1组）
+                            # 30算法杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32）
                             if "kill" in u.selected_modes and u.kill_enabled and u.last_killed_group:
                                 if u.kill_last_settled_issue != data.issue_id:
                                     u.kill_last_settled_issue = data.issue_id
@@ -2299,11 +1972,15 @@ class SystemOrchestrator:
                                         u.kill_consecutive_losses += 1
                                         logger.info(f"[用户 {uid}] 杀组命中: 杀{last_kill}=开{actual_combo}, 亏损{cost:.2f}, 连败{u.kill_consecutive_losses}")
                                     else:
-                                        # 没杀中，3组中1组，净赢 single_bet * 2.85 - cost（按 PC28 组合赔率约 2.85 估算）
-                                        win_amount = single_bet * 2.85
+                                        # 没杀中，3组中1组，按实际中奖组合赔率结算
+                                        if actual_combo in ("小单", "大双"):
+                                            odds = 3.71
+                                        else:
+                                            odds = 4.32
+                                        win_amount = single_bet * odds
                                         kill_pnl = win_amount - cost
                                         u.kill_consecutive_losses = 0
-                                        logger.info(f"[用户 {uid}] 杀组未中: 杀{last_kill}=开{actual_combo}, 盈利{kill_pnl:.2f}, 连败清零")
+                                        logger.info(f"[用户 {uid}] 杀组未中: 杀{last_kill}=开{actual_combo}(赔率{odds}), 盈利{kill_pnl:.2f}, 连败清零")
 
                                     u.risk_mgr.add_pnl(kill_pnl)
                                     u.save()
