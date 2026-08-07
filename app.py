@@ -918,12 +918,14 @@ class UserState:
         self.last_killed_group = ""       # 上期实际杀的组合
         self.kill_last_settled_issue = "" # 上期已结算期号
 
-        # 附加下注特码与豹子配置
-        self.extra_special_numbers = []  
-        self.extra_bauzi = False         
+        # 附加下注特码与豹子配置（特码 0/27/1/26 各自独立）
+        self.extra_special_numbers = []  # 例: ["0", "27", "1", "26"]
+        self.extra_bauzi = False
         self.extra_bet_amounts = {
-            "0_27": 100.0,
-            "1_26": 100.0,
+            "0": 100.0,
+            "27": 100.0,
+            "1": 100.0,
+            "26": 100.0,
             "baozi": 100.0
         }
 
@@ -979,9 +981,28 @@ class UserState:
                         self.broadcast_history = data.get("broadcast_history", [])
                         self.broadcast_sent_issues = data.get("broadcast_sent_issues", [])
                         self.broadcast_last_issue = data.get("broadcast_last_issue", "")
-                        # 附加
-                        self.extra_bet_amounts = data.get("extra_bet_amounts", {"0_27": 100.0, "1_26": 100.0, "baozi": 100.0})
+                        # 附加（兼容旧版分组数据并迁移为独立号码）
+                        self.extra_bet_amounts = data.get("extra_bet_amounts", {"0": 100.0, "27": 100.0, "1": 100.0, "26": 100.0, "baozi": 100.0})
                         self.extra_special_numbers = data.get("extra_special_numbers", [])
+                        # 迁移旧分组到独立号码
+                        migrated = []
+                        for x in self.extra_special_numbers:
+                            if x == "0_27":
+                                migrated.extend(["0", "27"])
+                            elif x == "1_26":
+                                migrated.extend(["1", "26"])
+                            elif x in ("0", "27", "1", "26"):
+                                migrated.append(x)
+                        self.extra_special_numbers = list(dict.fromkeys(migrated))
+                        # 迁移旧金额
+                        if "0_27" in self.extra_bet_amounts:
+                            self.extra_bet_amounts.setdefault("0", self.extra_bet_amounts["0_27"])
+                            self.extra_bet_amounts.setdefault("27", self.extra_bet_amounts["0_27"])
+                            del self.extra_bet_amounts["0_27"]
+                        if "1_26" in self.extra_bet_amounts:
+                            self.extra_bet_amounts.setdefault("1", self.extra_bet_amounts["1_26"])
+                            self.extra_bet_amounts.setdefault("26", self.extra_bet_amounts["1_26"])
+                            del self.extra_bet_amounts["1_26"]
                         self.extra_bauzi = data.get("extra_bauzi", False)
                         if "risk_mgr" in data:
                             self.risk_mgr = RiskManager.from_dict(data["risk_mgr"])
@@ -1197,12 +1218,16 @@ class SystemOrchestrator:
         ]
 
     def extra_config_keyboard(self, u_state: UserState):
-        c027 = "✅ " if "0_27" in u_state.extra_special_numbers else "⬜ "
-        c126 = "✅ " if "1_26" in u_state.extra_special_numbers else "⬜ "
+        c0 = "✅ " if "0" in u_state.extra_special_numbers else "⬜ "
+        c27 = "✅ " if "27" in u_state.extra_special_numbers else "⬜ "
+        c1 = "✅ " if "1" in u_state.extra_special_numbers else "⬜ "
+        c26 = "✅ " if "26" in u_state.extra_special_numbers else "⬜ "
         cbz = "✅ " if u_state.extra_bauzi else "⬜ "
         return [
-            [Button.inline(f"{c027}特码 0 / 27 (金额: {u_state.extra_bet_amounts.get('0_27', 100)})", data=b"toggle_extra_027")],
-            [Button.inline(f"{c126}特码 1 / 26 (金额: {u_state.extra_bet_amounts.get('1_26', 100)})", data=b"toggle_extra_126")],
+            [Button.inline(f"{c0}特码 0 (金额: {u_state.extra_bet_amounts.get('0', 100)})", data=b"toggle_extra_0")],
+            [Button.inline(f"{c27}特码 27 (金额: {u_state.extra_bet_amounts.get('27', 100)})", data=b"toggle_extra_27")],
+            [Button.inline(f"{c1}特码 1 (金额: {u_state.extra_bet_amounts.get('1', 100)})", data=b"toggle_extra_1")],
+            [Button.inline(f"{c26}特码 26 (金额: {u_state.extra_bet_amounts.get('26', 100)})", data=b"toggle_extra_26")],
             [Button.inline(f"{cbz}豹子下注 (金额: {u_state.extra_bet_amounts.get('baozi', 100)})", data=b"toggle_extra_bauzi")],
             [Button.inline("✏️ 修改特码/豹子下注金额", data=b"set_extra_amounts")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
@@ -1399,15 +1424,11 @@ class SystemOrchestrator:
             for c in bet_combos:
                 all_bet_lines.append(f"{c}/{int(single_bet)}")
 
-        # 附加特码与豹子下注
-        if "0_27" in u.extra_special_numbers:
-            amt_027 = u.extra_bet_amounts.get("0_27", 100.0)
-            all_bet_lines.append(f"0/{int(amt_027)}")
-            all_bet_lines.append(f"27/{int(amt_027)}")
-        if "1_26" in u.extra_special_numbers:
-            amt_126 = u.extra_bet_amounts.get("1_26", 100.0)
-            all_bet_lines.append(f"1/{int(amt_126)}")
-            all_bet_lines.append(f"26/{int(amt_126)}")
+        # 附加特码与豹子下注（特码各自独立）
+        for num in ["0", "27", "1", "26"]:
+            if num in u.extra_special_numbers:
+                amt = u.extra_bet_amounts.get(num, 100.0)
+                all_bet_lines.append(f"{num}/{int(amt)}")
         if u.extra_bauzi:
             amt_bz = u.extra_bet_amounts.get("baozi", 100.0)
             all_bet_lines.append(f"豹子/{int(amt_bz)}")
@@ -1541,27 +1562,45 @@ class SystemOrchestrator:
                 await event.answer("30算法杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
                 return
             if data == "intro_extra":
-                await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0/27、1/26）以及豹子。", alert=True)
+                await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0、27、1、26）以及豹子。", alert=True)
                 return
 
             if data == "extra_config":
                 await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
                 return
 
-            if data == "toggle_extra_027":
-                if "0_27" in u.extra_special_numbers:
-                    u.extra_special_numbers.remove("0_27")
+            if data == "toggle_extra_0":
+                if "0" in u.extra_special_numbers:
+                    u.extra_special_numbers.remove("0")
                 else:
-                    u.extra_special_numbers.append("0_27")
+                    u.extra_special_numbers.append("0")
                 u.save()
                 await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
                 return
 
-            if data == "toggle_extra_126":
-                if "1_26" in u.extra_special_numbers:
-                    u.extra_special_numbers.remove("1_26")
+            if data == "toggle_extra_27":
+                if "27" in u.extra_special_numbers:
+                    u.extra_special_numbers.remove("27")
                 else:
-                    u.extra_special_numbers.append("1_26")
+                    u.extra_special_numbers.append("27")
+                u.save()
+                await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
+                return
+
+            if data == "toggle_extra_1":
+                if "1" in u.extra_special_numbers:
+                    u.extra_special_numbers.remove("1")
+                else:
+                    u.extra_special_numbers.append("1")
+                u.save()
+                await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
+                return
+
+            if data == "toggle_extra_26":
+                if "26" in u.extra_special_numbers:
+                    u.extra_special_numbers.remove("26")
+                else:
+                    u.extra_special_numbers.append("26")
                 u.save()
                 await event.edit("请勾选您需要附加下注的特码与豹子", buttons=self.extra_config_keyboard(u))
                 return
@@ -1575,9 +1614,11 @@ class SystemOrchestrator:
             if data == "set_extra_amounts":
                 self.user_login_states[sid] = "WAIT_EXTRA_AMOUNTS"
                 await event.respond(
-                    "请输入特码与豹子的独立下注金额格式（格式: 特码金额,豹子金额）\n"
-                    f"当前设置 -> 特码: `{u.extra_bet_amounts.get('0_27', 100)}`, 豹子: `{u.extra_bet_amounts.get('baozi', 100)}`\n"
-                    "例如输入: `200,100`"
+                    "请输入特码与豹子的独立下注金额格式（格式: 0金额,27金额,1金额,26金额,豹子金额）\n"
+                    f"当前设置 -> 0:`{u.extra_bet_amounts.get('0', 100)}` 27:`{u.extra_bet_amounts.get('27', 100)}` "
+                    f"1:`{u.extra_bet_amounts.get('1', 100)}` 26:`{u.extra_bet_amounts.get('26', 100)}` "
+                    f"豹子:`{u.extra_bet_amounts.get('baozi', 100)}`\n"
+                    "例如输入: `100,100,100,100,200`"
                 )
                 return
 
@@ -1850,16 +1891,27 @@ class SystemOrchestrator:
             elif state == "WAIT_EXTRA_AMOUNTS":
                 try:
                     parts = event.text.strip().replace("，", ",").split(",")
-                    amt1 = float(parts[0].strip())
-                    amt2 = float(parts[1].strip()) if len(parts) > 1 else amt1
-                    u.extra_bet_amounts["0_27"] = amt1
-                    u.extra_bet_amounts["1_26"] = amt1
-                    u.extra_bet_amounts["baozi"] = amt2
+                    amts = [float(p.strip()) for p in parts if p.strip()]
+                    keys = ["0", "27", "1", "26", "baozi"]
+                    if len(amts) == 1:
+                        for k in keys:
+                            u.extra_bet_amounts[k] = amts[0]
+                    elif len(amts) == 2:
+                        for k in keys:
+                            u.extra_bet_amounts[k] = amts[1] if k == "baozi" else amts[0]
+                    elif len(amts) >= 5:
+                        for i, k in enumerate(keys):
+                            u.extra_bet_amounts[k] = amts[i]
+                    else:
+                        # 3 或 4 个金额时按顺序填充，其余保持不变
+                        for i, k in enumerate(keys):
+                            if i < len(amts):
+                                u.extra_bet_amounts[k] = amts[i]
                     u.save()
                     self.user_login_states.pop(sid, None)
                     await event.respond("特码与豹子独立金额更新成功", buttons=self.extra_config_keyboard(u))
                 except:
-                    await event.respond("格式错误，请重新输入，例如: `200,100`")
+                    await event.respond("格式错误，请重新输入，例如: `100,100,100,100,200`")
             elif state == "WAIT_KILL_AMOUNT":
                 try:
                     u.kill_bet_amount = max(1.0, float(event.text.strip()))
