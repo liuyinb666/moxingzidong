@@ -842,15 +842,7 @@ class HighWinRateManager:
                 if len(kill_nums) >= kill_count:
                     break
 
-        # 若不同预测不足 kill_count，按顺序补充其他高胜率模型的预测
-        for mid, rate, pred in results:
-            if pred not in used_preds:
-                kill_nums.append(pred)
-                used_preds.add(pred)
-                if len(kill_nums) >= kill_count:
-                    break
-
-        # 兜底：仍不足则随机补充
+        # 若模型预测的不同号码不足 kill_count，用未出现的号码按顺序补足
         if len(kill_nums) < kill_count:
             for n in range(10):
                 if n not in used_preds:
@@ -860,6 +852,8 @@ class HighWinRateManager:
                         break
 
         kill_nums = sorted(kill_nums)
+        if len(kill_nums) != kill_count:
+            logger.warning(f"[ABC精英模型] {ball_type}球杀码数量异常: 期望{kill_count}个,实际{len(kill_nums)}个, 结果={kill_nums}")
         status = "信心充足" if best_rate >= 0.92 else "盘面混乱"
         return {
             "model_id": best_mid,
@@ -1468,7 +1462,9 @@ class SystemOrchestrator:
                 for b_char in u.selected_balls:
                     pred_info = preds.get(b_char.upper(), {})
                     kill_nums = pred_info.get("kill_nums")
-                    if not kill_nums:
+                    if not kill_nums or len(kill_nums) != count:
+                        if kill_nums and len(kill_nums) != count:
+                            logger.warning(f"[用户 {u.user_id}] {b_char.upper()}球杀码数量异常: 期望{count}个,实际{len(kill_nums)}个,已修正")
                         kill_nums = random.sample(range(10), count)
                     u.last_ball_kills[b_char] = kill_nums
                     abc_pred_info[b_char] = pred_info
@@ -2076,7 +2072,7 @@ class SystemOrchestrator:
                                             actual_digit = nums[idx]
                                             multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
                                             single_bet = u.ball_bet_amount * multiplier
-                                            buy_count = 10 - u.abc_kill_count
+                                            buy_count = 10 - len(killed_list)
                                             cost = buy_count * single_bet
 
                                             if actual_digit not in killed_list:
