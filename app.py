@@ -735,82 +735,177 @@ class KillGroupPredictor:
 kill_group_predictor = KillGroupPredictor()
 
 
-# ==================== ABC 7码动态排除预测器（基于上期开奖+和值尾数） ====================
-class ABC7CodePredictor:
-    """7码动态排除预测器
-    规则：杀掉上期对应球、相邻球、和值尾数，去重后不足3个则按规则补位。
-    """
+# ==================== ABC杀码（小鶴神 v9.0 — 每球1000精英模型） ====================
+KILL_MODELS = {}
+
+def create_advanced_predictor(depth, offset, weight, formula_type, step):
+    """单个精英预测器：基于历史球号的加权公式"""
+    def predictor(history_balls):
+        if len(history_balls) < depth:
+            return offset % 10
+        segment = history_balls[:depth]
+        if formula_type == 0:
+            core_val = sum(val * (weight + idx) for idx, val in enumerate(segment[::step]))
+        elif formula_type == 1:
+            core_val = sum(abs(segment[i] - segment[i+1]) * weight for i in range(len(segment)-1))
+        else:
+            core_val = sum(segment) * weight + offset
+        return int(core_val) % 10
+    return predictor
+
+
+def _build_abc_models():
+    """为 A/B/C 三球各构建 1000 个精英预测器"""
+    global KILL_MODELS
+    KILL_MODELS.clear()
+    rng = random.Random(999)
+    for ball in ["A", "B", "C"]:
+        for i in range(1, 1001):
+            KILL_MODELS[f"Elite_{ball}_{i:04d}"] = {
+                "func": create_advanced_predictor(
+                    rng.randint(3, 20),
+                    rng.randint(0, 19),
+                    rng.uniform(0.1, 10.0),
+                    rng.randint(0, 2),
+                    rng.randint(1, 3)
+                ),
+                "ball": ball
+            }
+    logger.info(f"ABC杀码精英模型池构建完成: {len(KILL_MODELS)} 个模型")
+
+
+class HighWinRateManager:
+    """ABC杀码管理器：每球 1000 个精英模型，取最近 100 期回测最优"""
 
     @staticmethod
-    def _get_kill_nums(history, ball_type):
-        if not history or "nums" not in history[0] or len(history[0].get("nums", [])) < 3:
-            return [0, 1, 2]  # 数据不足时默认杀3个
-
-        latest = history[0]
-        a, b, c = latest["nums"][0], latest["nums"][1], latest["nums"][2]
-        s = latest.get("sum", a + b + c)
-        d = s % 10
-
-        # 各球基础杀号与补位规则
-        if ball_type == "A":
-            kills = {a, b, d}
-            first_supp = c
-            second_supp = (a + b) % 10
-        elif ball_type == "B":
-            kills = {b, c, d}
-            first_supp = a
-            second_supp = (b + c) % 10
-        else:  # C
-            kills = {c, a, d}
-            first_supp = b
-            second_supp = (c + a) % 10
-
-        # 去重后不足3个，依次补位
-        if len(kills) < 3:
-            if first_supp not in kills:
-                kills.add(first_supp)
-        if len(kills) < 3:
-            if second_supp not in kills:
-                kills.add(second_supp)
-        if len(kills) < 3:
-            if 9 not in kills:
-                kills.add(9)
-            elif 0 not in kills:
-                kills.add(0)
-        # 兜底：确保恰好3个杀号
-        for n in range(10):
-            if len(kills) >= 3:
-                break
-            kills.add(n)
-
-        return sorted(kills)
+    def _history_to_ball(history, ball_type):
+        """把 app.py 的 history 格式转换为该球位的数值列表（最新在前）"""
+        bi = {"A": 0, "B": 1, "C": 2}[ball_type]
+        result = []
+        for item in history:
+            nums = item.get("nums")
+            if nums and len(nums) > bi:
+                result.append(int(nums[bi]))
+            elif "number" in item and isinstance(item["number"], str) and "+" in item["number"]:
+                parts = item["number"].split("+")
+                if len(parts) > bi:
+                    result.append(int(parts[bi]))
+        return result
 
     @classmethod
-    def get_all_predictions(cls, history, balls=None, kill_count=None):
-        if balls is None:
-            balls = ["A", "B", "C"]
-        return {
-            b: {
-                "kill_nums": cls._get_kill_nums(history, b),
-                "bet_numbers": [n for n in range(10) if n not in cls._get_kill_nums(history, b)],
-                "status": "动态排除"
+    def get_strict_prediction(cls, history, ball_type, kill_count=1):
+        bh = cls._history_to_ball(history, ball_type)
+        kill_count = max(1, min(9, int(kill_count or 1)))
+        if not bh:
+            return {
+                "model_id": "N/A",
+                "win_rate": 0,
+                "kill_num": 0,
+                "status": "数据不足",
+                "bet_numbers": list(range(10)),
+                "kill_nums": list(range(kill_count))
             }
-            for b in balls
+        models = {m: i for m, i in KILL_MODELS.items() if i["ball"] == ball_type}
+        results = []
+        backtest_len = min(100, len(bh) - 1)
+        for mid, info in models.items():
+            try:
+                win = sum(1 for i in range(backtest_len) if bh[i] != info["func"](bh[i+1:]))
+                rate = win / backtest_len if backtest_len > 0 else 0
+                pred = info["func"](bh)
+                results.append((mid, rate, pred))
+            except Exception:
+                continue
+        if not results:
+            return {
+                "model_id": "N/A",
+                "win_rate": 0,
+                "kill_num": 0,
+                "status": "模型异常",
+                "bet_numbers": list(range(10)),
+                "kill_nums": list(range(kill_count))
+            }
+        results.sort(key=lambda x: x[1], reverse=True)
+
+        # 选取 top-kill_count 个不同预测号码（按模型胜率排序，确保多样性）
+        kill_nums = []
+        used_preds = set()
+        best_rate = 0.0
+        best_mid = "N/A"
+        for mid, rate, pred in results:
+            if pred not in used_preds:
+                kill_nums.append(pred)
+                used_preds.add(pred)
+                if len(kill_nums) == 1:
+                    best_rate = rate
+                    best_mid = mid
+                if len(kill_nums) >= kill_count:
+                    break
+
+        # 若不同预测不足 kill_count，按顺序补充其他高胜率模型的预测
+        for mid, rate, pred in results:
+            if pred not in used_preds:
+                kill_nums.append(pred)
+                used_preds.add(pred)
+                if len(kill_nums) >= kill_count:
+                    break
+
+        # 兜底：仍不足则随机补充
+        if len(kill_nums) < kill_count:
+            for n in range(10):
+                if n not in used_preds:
+                    kill_nums.append(n)
+                    used_preds.add(n)
+                    if len(kill_nums) >= kill_count:
+                        break
+
+        kill_nums = sorted(kill_nums)
+        status = "信心充足" if best_rate >= 0.92 else "盘面混乱"
+        return {
+            "model_id": best_mid,
+            "win_rate": round(best_rate, 4),
+            "kill_num": kill_nums[0] if kill_nums else 0,
+            "status": status,
+            "bet_numbers": [n for n in range(10) if n not in kill_nums],
+            "kill_nums": kill_nums
         }
 
     @classmethod
+    def get_all_predictions(cls, h, balls=None, kill_count=None):
+        if balls is None:
+            balls = ["A", "B", "C"]
+        if isinstance(kill_count, (int, float)):
+            kc = int(kill_count)
+        elif isinstance(kill_count, str):
+            try:
+                kc = int(kill_count)
+            except ValueError:
+                kc = 1
+        elif isinstance(kill_count, dict):
+            # 支持按球独立设置 {A:3, B:5, C:5}
+            pass
+        else:
+            kc = 1
+        if isinstance(kill_count, dict):
+            return {b: cls.get_strict_prediction(h, b, kill_count.get(b, kc)) for b in balls}
+        return {b: cls.get_strict_prediction(h, b, kc) for b in balls}
+
+    @classmethod
     def record_result(cls, ball_type, kill_nums, actual_num):
-        # 本规则为纯动态映射，无需跨期记忆
+        # 本管理器为静态回测选优，无需跨期记忆
         pass
 
     @classmethod
     def regenerate_abc_models(cls, history=None):
-        # 保持接口兼容，无需重新生成模型
-        logger.info("ABC 7码动态排除预测器无需重新生成模型")
-        return 0
+        _build_abc_models()
+        total = len(KILL_MODELS)
+        logger.info(f"ABC杀码精英模型已重新生成！模型总数: {total}")
+        return total
 
 
-abc_manager = ABC7CodePredictor()
+_build_abc_models()
+abc_manager = HighWinRateManager()
+
 
 
 
@@ -1358,16 +1453,17 @@ class SystemOrchestrator:
         u.last_killed_group = ""
 
         # ========== 1. 生成所有预测（ABC球 + 杀组） ==========
-        # ABC杀球模式：使用7码动态排除预测器（杀上期号码+和值尾数）
+        # ABC杀球模式：使用小鶴神精英模型（每球1000模型选优，支持自定义杀码数）
         abc_multiplier = 1.0
         abc_pred_info = {}
         if "ball" in u.selected_modes:
             abc_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
-            count = 3  # 7码投注固定杀3个
+            count = max(1, min(9, u.abc_kill_count))
             try:
                 preds = abc_manager.get_all_predictions(
                     u.history,
-                    balls=[b_char.upper() for b_char in u.selected_balls]
+                    balls=[b_char.upper() for b_char in u.selected_balls],
+                    kill_count=count
                 )
                 for b_char in u.selected_balls:
                     pred_info = preds.get(b_char.upper(), {})
@@ -1376,9 +1472,9 @@ class SystemOrchestrator:
                         kill_nums = random.sample(range(10), count)
                     u.last_ball_kills[b_char] = kill_nums
                     abc_pred_info[b_char] = pred_info
-                active_descriptions.append(f"ABC杀球(7码动态排除杀{count}码,倍投{abc_multiplier:.1f}x)")
+                active_descriptions.append(f"ABC杀球(精英模型杀{count}码,倍投{abc_multiplier:.1f}x)")
             except Exception as e:
-                logger.error(f"[用户 {u.user_id}] ABC7码动态排除预测失败: {e}")
+                logger.error(f"[用户 {u.user_id}] ABC精英模型预测失败: {e}")
 
         # 30算法杀组模式
         kill_target_for_bet = None
@@ -1990,7 +2086,7 @@ class SystemOrchestrator:
                                             else:
                                                 total_abc_pnl -= cost
                                                 logger.info(f"[用户 {uid}] ABC球 {b_char.upper()}球 未中: 开奖{actual_digit} 在杀码{killed_list}, 亏损{cost:.2f}")
-                                            # 记录ABC结果（新7码预测器无需跨期记忆，保留接口兼容）
+                                            # 记录ABC结果（精英模型为静态回测选优，无需跨期记忆）
                                             try:
                                                 abc_manager.record_result(b_char.upper(), killed_list, actual_digit)
                                             except Exception as e:
