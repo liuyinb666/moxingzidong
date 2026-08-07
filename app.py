@@ -876,8 +876,7 @@ class HighWinRateManager:
             except ValueError:
                 kc = 1
         elif isinstance(kill_count, dict):
-            # 支持按球独立设置 {A:3, B:5, C:5}
-            pass
+            kc = 1
         else:
             kc = 1
         if isinstance(kill_count, dict):
@@ -899,6 +898,8 @@ class HighWinRateManager:
 
 _build_abc_models()
 abc_manager = HighWinRateManager()
+
+
 
 
 
@@ -992,7 +993,9 @@ class UserState:
         # ABC独立设置
         self.ball_bet_amount = 100.0
         self.abc_kill_count = 5           # 杀a球默认杀5码
-        self.abc_martingale_multiplier = 2.0  # ABC倍投倍数
+        # ABC自定义倍投倍数列表：第0次(首注)=1，第1次(首亏后)=3，依此类推
+        self.abc_martingale_multipliers = [1.0, 3.0, 7.0, 11.0, 15.0]
+        self.abc_martingale_multiplier = 2.0  # 兼容旧数据（未配置列表时使用）
         self.abc_consecutive_losses = 0   # ABC连败次数
 
         # 上期ABC杀球记录 {b_char: [killed_digits]}
@@ -1050,7 +1053,14 @@ class UserState:
                         self.selected_balls = data.get("selected_balls", ["a"])
                         self.ball_bet_amount = data.get("ball_bet_amount", 100.0)
                         self.abc_kill_count = data.get("abc_kill_count", 1)
-                        self.abc_martingale_multiplier = data.get("abc_martingale_multiplier", 2.0)
+                        # 加载自定义倍投列表，旧数据自动迁移
+                        loaded_mults = data.get("abc_martingale_multipliers")
+                        if isinstance(loaded_mults, list) and loaded_mults:
+                            self.abc_martingale_multipliers = [float(x) for x in loaded_mults]
+                        else:
+                            old_m = float(data.get("abc_martingale_multiplier", 2.0))
+                            self.abc_martingale_multipliers = [1.0, old_m, old_m ** 2, old_m ** 3, old_m ** 4]
+                        self.abc_martingale_multiplier = float(data.get("abc_martingale_multiplier", 2.0))
                         self.abc_consecutive_losses = data.get("abc_consecutive_losses", 0)
                         self.last_ball_kills = data.get("last_ball_kills", {})
                         # 杀组
@@ -1109,6 +1119,7 @@ class UserState:
                         "selected_modes": self.selected_modes, "selected_balls": self.selected_balls,
                         "ball_bet_amount": self.ball_bet_amount,
                         "abc_kill_count": self.abc_kill_count,
+                        "abc_martingale_multipliers": self.abc_martingale_multipliers,
                         "abc_martingale_multiplier": self.abc_martingale_multiplier,
                         "abc_consecutive_losses": self.abc_consecutive_losses,
                         "last_ball_kills": self.last_ball_kills,
@@ -1134,6 +1145,11 @@ class UserState:
                     }, f, ensure_ascii=False)
             except Exception as e:
                 logger.error(f"保存用户 {self.user_id} 档案出错: {e}")
+
+    def get_abc_multiplier(self):
+        """根据当前连败次数返回对应的自定义倍投倍数"""
+        idx = min(self.abc_consecutive_losses, len(self.abc_martingale_multipliers) - 1)
+        return float(self.abc_martingale_multipliers[idx])
 
     async def try_reconnect(self):
         session_path = os.path.join(SESSIONS_DIR, f"user_{self.user_id}")
@@ -1323,12 +1339,12 @@ class SystemOrchestrator:
         ]
 
     def amounts_menu_keyboard(self, u_state: UserState):
-        current_multiplier = u_state.abc_martingale_multiplier ** u_state.abc_consecutive_losses
+        current_multiplier = u_state.get_abc_multiplier()
         triggered, reason = u_state.risk_mgr.check_triggered()
         risk_status = f"🔴 {reason}" if triggered else "🟢 正常"
         return [
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
-            [Button.inline(f"ABC倍投倍数: {u_state.abc_martingale_multiplier}x", data=b"set_abc_multiplier")],
+            [Button.inline(f"ABC倍投序列: {u_state.abc_martingale_multipliers}", data=b"set_abc_multiplier")],
             [Button.inline(f"ABC杀码数量: {u_state.abc_kill_count}个", data=b"set_abc_kill_count")],
             [Button.inline(f"杀组单注金额: {u_state.kill_bet_amount}", data=b"set_kill_amount")],
             [Button.inline(f"杀组倍投倍数: {u_state.kill_martingale_multiplier}x", data=b"set_kill_multiplier")],
@@ -1451,7 +1467,7 @@ class SystemOrchestrator:
         abc_multiplier = 1.0
         abc_pred_info = {}
         if "ball" in u.selected_modes:
-            abc_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+            abc_multiplier = u.get_abc_multiplier()
             count = max(1, min(9, u.abc_kill_count))
             try:
                 preds = abc_manager.get_all_predictions(
@@ -1587,7 +1603,7 @@ class SystemOrchestrator:
                 f"• 挂机状态: `{status_text}`\n"
                 f"• 绑定群组: `{len(u.groups)}` 个\n"
                 f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                f"• ABC倍投序列: `{u.abc_martingale_multipliers}`\n"
                 f"• 30算法杀组: `{kill_status}`\n"
                 f"• 报数播报: `{bc_status}`\n"
                 f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
@@ -1772,7 +1788,7 @@ class SystemOrchestrator:
                     f"• 挂机状态: `{status_text}`\n"
                     f"• 绑定群组: `{len(u.groups)}` 个\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• ABC倍投序列: `{u.abc_martingale_multipliers}`\n"
                     f"• 30算法杀组: `{kill_status}`\n"
                     f"• 报数播报: `{bc_status}`\n"
                     f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
@@ -1827,7 +1843,7 @@ class SystemOrchestrator:
                 await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`\n请输入新金额:")
             elif data == "set_abc_multiplier":
                 self.user_login_states[sid] = "WAIT_ABC_MULTIPLIER"
-                await event.respond(f"当前ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n请输入新倍数(如 2.0 或 3.0):")
+                await event.respond("当前ABC倍投序列: `{seq}`\n请输入新的倍投序列，用英文逗号分隔（如: 1,3,7,11,15）:".format(seq=u.abc_martingale_multipliers))
             elif data == "set_abc_kill_count":
                 self.user_login_states[sid] = "WAIT_ABC_KILL_COUNT"
                 await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个\n请输入数量(1-9):")
@@ -1839,7 +1855,7 @@ class SystemOrchestrator:
                 await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`\n请输入新金额(输入 0 为不限制):")
             elif data == "stats":
                 rm = u.risk_mgr
-                current_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+                current_multiplier = u.get_abc_multiplier()
                 kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
                 can_bet, reason = rm.can_bet()
                 triggered, trigger_reason = rm.check_triggered()
@@ -1848,7 +1864,7 @@ class SystemOrchestrator:
                     f"--------------------\n"
                     f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• ABC倍投序列: `{u.abc_martingale_multipliers}`\n"
                     f"• ABC当前连败: `{u.abc_consecutive_losses}` 次\n"
                     f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`\n"
                     f"• 杀组状态: `{'启用' if ('kill' in u.selected_modes and u.kill_enabled) else '未启用'}`\n"
@@ -1946,12 +1962,21 @@ class SystemOrchestrator:
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_ABC_MULTIPLIER":
                 try:
-                    val = float(event.text.strip())
-                    u.abc_martingale_multiplier = max(1.0, val)
+                    text = event.text.strip().replace("，", ",")
+                    parts = [p.strip() for p in text.split(",") if p.strip()]
+                    if not parts:
+                        raise ValueError("空输入")
+                    mults = [max(1.0, float(p)) for p in parts]
+                    # 若只输入一个数字，按旧逻辑生成等比序列
+                    if len(mults) == 1:
+                        base = mults[0]
+                        mults = [1.0, base, base ** 2, base ** 3, base ** 4]
+                    u.abc_martingale_multipliers = mults
+                    u.abc_martingale_multiplier = mults[1] if len(mults) > 1 else mults[0]
                     u.save()
-                    await event.respond(f"ABC倍投倍数更新为: `{u.abc_martingale_multiplier}x`", buttons=self.main_keyboard(u))
+                    await event.respond(f"ABC倍投序列更新为: `{u.abc_martingale_multipliers}`", buttons=self.main_keyboard(u))
                 except:
-                    await event.respond("请输入有效数字")
+                    await event.respond("格式错误，请输入倍投序列，例如: `1,3,7,11,15`")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_ABC_KILL_COUNT":
                 try:
@@ -2070,7 +2095,7 @@ class SystemOrchestrator:
                                         if len(nums) > idx:
                                             has_any_bet = True
                                             actual_digit = nums[idx]
-                                            multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+                                            multiplier = u.get_abc_multiplier()
                                             single_bet = u.ball_bet_amount * multiplier
                                             buy_count = 10 - len(killed_list)
                                             cost = buy_count * single_bet
@@ -2216,7 +2241,7 @@ def start_bot_thread():
 
 with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已集成6种算法动态回测选优杀组模式（π算法、双杀组、天子、5Y、小枫、小盾）与同款报数播报功能。ABC杀球模式支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
+    gr.Markdown("已集成6种算法动态回测选优杀组模式（π算法、双杀组、天子、5Y、小枫、小盾）与同款报数播报功能。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
 
