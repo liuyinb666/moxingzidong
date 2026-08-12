@@ -948,6 +948,13 @@ class RiskManager:
         self._ensure_daily_reset()
         self.daily_pnl += amount
 
+    def reset_daily_pnl(self):
+        """手动重置今日盈亏为0"""
+        prev_pnl = self.daily_pnl
+        self.daily_pnl = 0.0
+        logger.info(f"手动重置今日盈亏: 原盈亏 {prev_pnl:+.2f} -> 0.0")
+        return prev_pnl
+
     def to_dict(self):
         self._ensure_daily_reset()
         return {
@@ -1302,7 +1309,7 @@ class SystemOrchestrator:
             [Button.inline("➕ 绑定群组", data=b"add_g"), Button.inline("➖ 移除群组", data=b"del_g"), Button.inline("📋 群组列表", data=b"list_g")],
             [Button.inline(f"⏱ 投递延迟: {u_state.custom_delay}s", data=b"set_delay"), Button.inline("📝 设置自定义尾缀", data=b"set_suffix")],
             [Button.inline("📖 模式介绍与说明", data=b"mode_intro_menu")],
-            [Button.inline("📈 实时收益战报", data=b"stats")]
+            [Button.inline("📈 实时收益战报", data=b"stats"), Button.inline("🔄 清空今日盈亏", data=b"reset_pnl")]
         ]
 
     def mode_selection_keyboard(self, u_state: UserState):
@@ -1876,6 +1883,14 @@ class SystemOrchestrator:
                     f"• 每日止损线: `{rm.daily_stop_loss}`\n"
                     f"• 风控状态: `{'🔴 已触发: ' + trigger_reason if triggered else '🟢 正常'}`\n"
                     f"--------------------"
+                )
+            elif data == "reset_pnl":
+                prev_pnl = u.risk_mgr.reset_daily_pnl()
+                u.save_state()
+                await event.respond(
+                    f"✅ 已清空今日盈亏\n"
+                    f"• 原盈亏: `{prev_pnl:+.2f}`\n"
+                    f"• 当前盈亏: `0.00`"
                 )
 
         @self.bot.on(events.NewMessage)
