@@ -79,553 +79,146 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================== 算法基类与 6 个内置算法 ====================
+# ==================== 吮欲杀组算法（从 2期杀组.html 移植）====================
 
-class BasePredictor:
-    """所有预测算法的基类"""
-    name = "base"
-    version = "1.0"
+class ShunYuAlgo1Predictor(BasePredictor):
+    """吮欲算法1·基础定义（4y分组 + 8条特殊规则）"""
+    name = "shunyu_algo1"
 
-    def predict(self, history: list) -> dict:
-        raise NotImplementedError
-
-    def update(self, actual: dict):
-        pass
-
-    def _base_scores(self, value=50):
-        return {"大单": value, "大双": value, "小单": value, "小双": value}
-
-    def _combo(self, size, odd):
-        return f"{size}{odd}"
-
-
-"""π 算法 - 基于最新和值、上一期和值与上期组合进行判定"""
-
-class PiPredictor(BasePredictor):
-    name = "pi"
-
-    _OPPOSITE = {
-        "大单": "小双",
-        "大双": "小单",
-        "小单": "大双",
-        "小双": "大单",
-    }
-
-    def _digit_sum(self, n: int) -> int:
-        s = 0
-        while n > 0:
-            s += n % 10
-            n //= 10
-        return s
-
-    def _reduce_to_one_digit(self, n: int) -> int:
-        while n >= 10:
-            n = self._digit_sum(n)
-        return n
-
-    def _first_three_digits(self, value: float) -> list:
-        s = f"{value:.15f}".replace(".", "")
-        return [int(ch) for ch in s[:3]]
-
-    def _combo_from_z(self, z: int) -> str:
-        if z < 10:
-            return "小单" if z % 2 == 1 else "小双"
-        return "大单" if z % 2 == 1 else "大双"
-
-    def predict(self, history: list) -> dict:
-        if len(history) < 2:
-            return self._base_scores()
-
-        A = history[0]["total"]
-        B = history[1]["total"]
-        C = history[1]["size"] + history[1]["odd_even"]
-
-        product = A * 3.1415926
-        digits = self._first_three_digits(product)
-        X = self._reduce_to_one_digit(sum(digits))
-        Y = X * B
-
-        if Y < 100:
-            Z = (Y // 10) + (Y % 10)
+    def _get_type_by_number(self, n: int) -> str:
+        if n < 0 or n > 27:
+            return '未知'
+        is_small = n <= 13
+        is_odd = n % 2 == 1
+        if is_small:
+            return '小单' if is_odd else '小双'
         else:
-            Z = self._reduce_to_one_digit(self._digit_sum(Y))
-        if Z == 10:
-            Z = 2
-
-        combo = self._combo_from_z(Z)
-        if combo == C:
-            combo = self._OPPOSITE.get(combo, combo)
-
-        scores = self._base_scores(0)
-        scores[combo] = 100
-        return scores
-
-
-"""复杂双杀组算法 - 仅实现模块 1 的最终杀组判定"""
-
-class ComplexDualKillPredictor(BasePredictor):
-    name = "complex_dual_kill"
-
-    _OPPOSITE = {
-        "小单": "大双",
-        "小双": "大单",
-        "大单": "小双",
-        "大双": "小单",
-    }
-
-    def _digit_sum(self, n: int) -> int:
-        s = 0
-        while n > 0:
-            s += n % 10
-            n //= 10
-        return s
-
-    def _combo_from_s(self, s: int) -> str:
-        size = "小" if s <= 13 else "大"
-        odd = "单" if s % 2 == 1 else "双"
-        return f"{size}{odd}"
-
-    def _calc_y1(self, nums, total):
-        concat = int(f"{nums[0]}{nums[1]}{nums[2]}")
-        return self._digit_sum(concat + total)
-
-    def predict(self, history: list) -> dict:
-        if len(history) < 10:
-            return self._base_scores()
-
-        latest = history[0]
-        A1, B1, C1 = latest["nums"]
-        H1 = latest["total"]
-
-        Y1 = self._calc_y1([A1, B1, C1], H1)
-        matched = None
-        for item in history[1:]:
-            if self._calc_y1(item["nums"], item["total"]) == Y1:
-                matched = item
-                break
-
-        if matched is None:
-            return self._base_scores()
-
-        A2, B2, C2 = matched["nums"]
-        S_diff = abs(A1 - A2) + abs(B1 - B2) + abs(C1 - C2)
-        kill1 = self._combo_from_s(S_diff)
-
-        step1 = H1 * 3 * H1
-        last3 = step1 % 1000
-        D2 = self._digit_sum(last3)
-        S = D2 + A1
-        if S > 27:
-            S -= 27
-        combo_z3 = self._combo_from_s(S)
-        kill2 = self._OPPOSITE[combo_z3]
-
-        if kill1 == kill2:
-            final = kill1
-        else:
-            return self._base_scores()
-
-        scores = self._base_scores(0)
-        scores[final] = 100
-        return scores
-
-
-# 天子 / 5Y 算法共用工具函数
-
-def _normalize_r(R):
-    while R > 27:
-        R -= 28
-    while R < 0:
-        R += 28
-    return max(0, min(27, R))
-
-
-def _get_combo(sum_value):
-    return ("小" if sum_value <= 13 else "大") + ("双" if sum_value % 2 == 0 else "单")
-
-
-"""天子算法 - compute_main_algorithm 移植"""
-
-class TianZiPredictor(BasePredictor):
-    name = "tianzi"
-
-    def _compute(self, data, index):
-        if index >= len(data) or index + 15 >= len(data):
-            return None
-
-        cur, back5, back10, back15 = data[index], data[index + 5], data[index + 10], data[index + 15]
-
-        a, b, c = cur["nums"]
-        S = sum(cur["nums"])
-        S5 = sum(back5["nums"])
-        S10 = sum(back10["nums"])
-        S15 = sum(back15["nums"])
-
-        if S == 0:
-            S = 1
-
-        T1 = (a + c) * b + back10["nums"][1]
-        T2 = (back5["nums"][0] + back5["nums"][2]) * back5["nums"][1] + back15["nums"][1]
-        R = (T1 + T2) // 2
-
-        momentum = (S - S5) + (S5 - S10) + (S10 - S15)
-        R += max(-5, min(5, momentum // 3))
-        R = _normalize_r(R)
-
-        recent_sums = [data[i]["total"] for i in range(index + 1, min(index + 50, len(data)))]
-        if recent_sums:
-            recent_avg = sum(recent_sums) / len(recent_sums)
-            recent_std = (
-                sum((x - recent_avg) ** 2 for x in recent_sums) / len(recent_sums)
-            ) ** 0.5 if recent_sums else 5
-
-            if recent_std > 6:
-                R = _normalize_r(int(recent_avg) + random.randint(-3, 3))
-            elif abs(R - recent_avg) > 8:
-                R = _normalize_r(int(recent_avg) + (R - int(recent_avg)) // 2)
-
-            recent_counts = Counter(recent_sums[-8:])
-            if recent_counts and recent_counts.most_common(1)[0][1] >= 3:
-                freq_val = recent_counts.most_common(1)[0][0]
-                if abs(R - freq_val) < 3:
-                    R = _normalize_r(R + 7)
-
-            if len(recent_sums) >= 5:
-                last5_avg = sum(recent_sums[:5]) / 5
-                if R < 10 and last5_avg > 18:
-                    R = _normalize_r(R + 14)
-                elif R > 17 and last5_avg < 9:
-                    R = _normalize_r(R - 14)
-
-        return {"kill": "杀" + _get_combo(R), "sum": R}
-
-    def predict(self, history: list) -> dict:
-        if len(history) < 16:
-            return self._base_scores()
-        result = self._compute(history, 0)
-        if not result:
-            return self._base_scores()
-        kill = result["kill"].replace("杀", "")
-        scores = self._base_scores(0)
-        scores[kill] = 100
-        return scores
-
-
-"""5Y 算法 - compute_5y_algorithm 移植"""
-
-class FiveYPredictor(BasePredictor):
-    name = "5y"
-
-    def _compute(self, data, index):
-        if index >= len(data) or index + 10 >= len(data):
-            return None
-
-        cur, back5, back10 = data[index], data[index + 5], data[index + 10]
-
-        b = cur["nums"][1]
-        S = sum(cur["nums"])
-        S5 = sum(back5["nums"])
-        S10 = sum(back10["nums"])
-
-        if S == 0:
-            S = 1
-
-        valB = (b % 5 + 1)
-        valS = (S % 5 + 1)
-        base = (valB * valS) % 10
-
-        volatility = abs(S - S5) + abs(S5 - S10)
-        volatility_factor = (volatility % 5) + 1
-
-        trend = 2 if (S > S5 and S5 > S10) else (0 if (S < S5 and S5 < S10) else 1)
-
-        R = _normalize_r(base * 3 + volatility_factor * 2 + trend)
-
-        recent_sums = [data[i]["total"] for i in range(index + 1, min(index + 50, len(data)))]
-        if recent_sums:
-            recent_avg = sum(recent_sums) / len(recent_sums)
-            recent_var = sum((x - recent_avg) ** 2 for x in recent_sums) / len(recent_sums)
-
-            if recent_var > 20:
-                R = _normalize_r(int(recent_avg) + random.randint(-4, 4))
-
-            recent_counts = Counter(recent_sums[-10:])
-            if recent_counts:
-                most_common = recent_counts.most_common(3)
-                weights = [0.5, 0.3, 0.2]
-                weighted_sum = 0
-                total_w = 0
-                for i, (val, cnt) in enumerate(most_common):
-                    if i < len(weights):
-                        weighted_sum += val * weights[i] * cnt
-                        total_w += weights[i] * cnt
-                if total_w > 0:
-                    weighted_avg = weighted_sum / total_w
-                    R = _normalize_r(int(weighted_avg * 0.6 + R * 0.4))
-
-            if len(recent_sums) >= 6:
-                first3 = sum(recent_sums[:3]) / 3
-                last3 = sum(recent_sums[-3:]) / 3
-                diff = last3 - first3
-                if abs(diff) > 5:
-                    R = _normalize_r(R + int(diff / 2))
-
-        if index + 1 < len(data):
-            recent_shapes = [_get_combo(data[i]["total"]) for i in range(index + 1, min(index + 6, len(data)))]
-            kill_shape = _get_combo(R)
-            if kill_shape in recent_shapes:
-                R = _normalize_r(R + 7)
-                if _get_combo(R) == kill_shape:
-                    R = _normalize_r(R + 14)
-
-        return {"kill": "杀" + _get_combo(R), "sum": R}
-
-    def predict(self, history: list) -> dict:
-        if len(history) < 11:
-            return self._base_scores()
-        result = self._compute(history, 0)
-        if not result:
-            return self._base_scores()
-        kill = result["kill"].replace("杀", "")
-        scores = self._base_scores(0)
-        scores[kill] = 100
-        return scores
-
-
-"""小枫算法 - compute_xiaofeng_algorithm 移植"""
-
-class _XiaoFengDraw:
-    def __init__(self, hundreds, tens, ones):
-        self.hundreds = hundreds
-        self.tens = tens
-        self.ones = ones
-
-    @property
-    def sum_value(self):
-        return self.hundreds + self.tens + self.ones
-
-    @property
-    def seven_y(self):
-        return self.sum_value % 7
-
-    @property
-    def group(self):
-        s = self.sum_value
-        if s <= 13:
-            return "小单" if s % 2 == 1 else "小双"
-        return "大单" if s % 2 == 1 else "大双"
-
-
-class XiaoFengPredictor(BasePredictor):
-    name = "xiaofeng"
-
-    _OPPOSITE = {
-        "小单": "大双",
-        "小双": "大单",
-        "大单": "小双",
-        "大双": "小单",
-    }
-
-    def _compute(self, data, index):
-        if index >= len(data) or len(data) < 3:
-            return None
-
-        draws = []
-        for item in data:
-            nums = item["nums"]
-            draws.append(_XiaoFengDraw(nums[0], nums[1], nums[2]))
-
-        current = draws[index] if index < len(draws) else draws[0]
-        seven_y = current.seven_y
-
-        refs = []
-        for i, d in enumerate(draws[index + 1:], index + 1):
-            if d.seven_y == seven_y:
-                refs.append((d, i - index))
-                if len(refs) >= 5:
-                    break
-
-        DIGIT_MAP = {
-            0: ("十位", lambda d: [d.tens]),
-            1: ("个位", lambda d: [d.ones]),
-            2: ("百位", lambda d: [d.hundreds]),
-            3: ("百位+十位", lambda d: [d.hundreds, d.tens]),
-            4: ("个位", lambda d: [d.ones]),
-            5: ("十位", lambda d: [d.tens]),
-            6: ("百位", lambda d: [d.hundreds]),
+            return '大单' if is_odd else '大双'
+
+    def _get_opposite_combo(self, combo: str) -> str:
+        """取组合的反面：大小相反，单双相反"""
+        opposites = {
+            "小单": "大双",
+            "小双": "大单",
+            "大单": "小双",
+            "大双": "小单",
         }
-        POS_ATTR = {2: "hundreds", 6: "hundreds", 0: "tens", 5: "tens", 1: "ones", 4: "ones"}
-
-        votes = {}
-        for ref, distance in refs:
-            _, get_digits = DIGIT_MAP[seven_y]
-            taken = get_digits(ref)
-
-            if seven_y == 3:
-                new_digit = (current.hundreds + current.tens + sum(taken)) % 10
-                new_draw = _XiaoFengDraw(new_digit, new_digit, current.ones)
-            else:
-                attr = POS_ATTR[seven_y]
-                new_digit = (getattr(current, attr) + taken[0]) % 10
-                h, t, o = current.hundreds, current.tens, current.ones
-                if seven_y in (2, 6):
-                    h = new_digit
-                elif seven_y in (0, 5):
-                    t = new_digit
-                else:
-                    o = new_digit
-                new_draw = _XiaoFengDraw(h, t, o)
-
-            y_n = new_draw.sum_value % 7
-            group = None
-
-            if y_n == 0:
-                group = "小单"
-            elif y_n == 1:
-                group = "大单"
-            elif y_n == 2:
-                group = "小双"
-            elif y_n == 3:
-                group = "大双"
-            elif y_n == 4:
-                group = "小单"
-            elif y_n == 5:
-                group = new_draw.group
-            elif y_n == 6:
-                group = self._OPPOSITE.get(new_draw.group, new_draw.group)
-
-            if group:
-                weight = 3 if distance == 1 else (2 if distance == 2 else 1)
-                votes[group] = votes.get(group, 0) + weight
-
-        if votes:
-            kill_group = max(votes, key=votes.get)
-        else:
-            counts = Counter(d.group for d in draws)
-            kill_group = counts.most_common()[-1][0] if counts else "小单"
-
-        if len(draws) >= 3:
-            last1 = draws[1].group if len(draws) > 1 else None
-            last2 = draws[2].group if len(draws) > 2 else None
-            if last1 == last2 and last1 == kill_group:
-                kill_group = self._OPPOSITE.get(kill_group, kill_group)
-
-        return {"kill": "杀" + kill_group}
+        return opposites.get(combo, "小单")
 
     def predict(self, history: list) -> dict:
         if len(history) < 3:
             return self._base_scores()
-        result = self._compute(history, 0)
-        if not result:
-            return self._base_scores()
-        kill = result["kill"].replace("杀", "")
+
+        latest = history[0]
+        prev = history[1]
+        prev2 = history[2]
+
+        nums_latest = latest["nums"]
+        nums_prev = prev["nums"]
+        nums_prev2 = prev2["nums"]
+        L = latest["total"]
+        y = L % 4
+
+        if y == 0:
+            tail1 = L % 10
+            tail2 = prev["total"] % 10
+            tail3 = prev2["total"] % 10
+            N = tail1 + tail2 + tail3
+        elif y == 1:
+            N = nums_prev[0] + nums_latest[1] + nums_latest[2]
+        elif y == 2:
+            N = nums_latest[0] + nums_prev[1] + nums_latest[2]
+        else:  # y == 3
+            N = nums_latest[0] + nums_latest[1] + nums_prev[2]
+
+        n_type = self._get_type_by_number(N)
+
+        # 8条特殊规则：直接修改 n_type（被杀的是 n_type 的反面）
+        if N == 15:
+            n_type = '小双'   # 原规则：小+双 → 杀大单
+        else:
+            if L == 13 or L == 14:
+                if N < 14:
+                    n_type = '小双'   # 小+双 → 杀大单
+                elif N > 13:
+                    n_type = '大单'   # 大+单 → 杀小双
+            elif L == 23:
+                n_type = '大单'       # 大+单 → 杀小双
+            elif L == 24:
+                n_type = '小双'       # 小+双 → 杀大单
+            elif L == 5:
+                n_type = '小单'       # 小+单 → 杀大双
+            elif L == 4:
+                n_type = '小双'       # 小+双 → 杀大单
+            elif L == 12:
+                n_type = '小单'       # 小+单 → 杀大双
+            elif L == 15:
+                n_type = '大双'       # 大+双 → 杀小单
+
+        kill = self._get_opposite_combo(n_type)
         scores = self._base_scores(0)
         scores[kill] = 100
         return scores
 
 
-"""小盾算法 - compute_xiaodun_algorithm / PC28PredictorV7 移植"""
+class ShunYuAlgo2Predictor(BasePredictor):
+    """吮欲算法2·4y算法（无特殊规则）"""
+    name = "shunyu_algo2"
 
-class XiaoDunPredictor(BasePredictor):
-    name = "xiaodun"
+    def _get_type_by_number(self, n: int) -> str:
+        if n < 0 or n > 27:
+            return '未知'
+        is_small = n <= 13
+        is_odd = n % 2 == 1
+        if is_small:
+            return '小单' if is_odd else '小双'
+        else:
+            return '大单' if is_odd else '大双'
 
-    def __init__(self):
-        self.alpha = 1.0
-        self.global_prior = {"小单": 0.20, "小双": 0.28, "大单": 0.24, "大双": 0.28}
-
-    def _add_data(self, data_list):
-        history = []
-        for item in data_list:
-            nums = item["nums"]
-            total = item["total"]
-            is_big = total >= 14
-            is_single = total % 2 == 1
-            combination = ("大" if is_big else "小") + ("单" if is_single else "双")
-            history.append({
-                "period": str(item.get("issue", "")),
-                "total": total,
-                "combination": combination,
-                "is_big": is_big,
-                "is_single": is_single,
-                "nums": nums,
-                "yu5": total % 5,
-            })
-        return history
-
-    def _get_smoothed_trans_prob(self, from_combo, to_combo, history_slice):
-        trans_count = 0
-        total_from = 0
-        for i in range(len(history_slice) - 1):
-            if history_slice[i]["combination"] == from_combo:
-                total_from += 1
-                if history_slice[i + 1]["combination"] == to_combo:
-                    trans_count += 1
-        num_classes = 4
-        return (trans_count + self.alpha) / (total_from + self.alpha * num_classes)
-
-    def _get_cold_streak(self, combo, history_slice):
-        streak = 0
-        for i in range(len(history_slice) - 1, -1, -1):
-            if history_slice[i]["combination"] == combo:
-                break
-            streak += 1
-        return streak
-
-    def _calculate_next_prob(self, combo, history_slice):
-        if len(history_slice) < 1:
-            return self.global_prior[combo]
-        current = history_slice[-1]["combination"]
-        n = len(history_slice)
-        trans_prob = self._get_smoothed_trans_prob(current, combo, history_slice)
-        global_freq = sum(1 for d in history_slice if d["combination"] == combo) / n
-        recent = history_slice[-10:] if n >= 10 else history_slice
-        recent_freq = sum(1 for d in recent if d["combination"] == combo) / len(recent)
-        short = history_slice[-5:] if n >= 5 else history_slice
-        short_freq = sum(1 for d in short if d["combination"] == combo) / len(short)
-        return (
-            trans_prob * 0.40 +
-            global_freq * 0.15 +
-            recent_freq * 0.25 +
-            short_freq * 0.20
-        )
-
-    def _compute_probs_and_cold(self, history_slice):
-        probs = {}
-        cold_streaks = {}
-        for combo in ["小单", "小双", "大单", "大双"]:
-            probs[combo] = self._calculate_next_prob(combo, history_slice)
-            cold_streaks[combo] = self._get_cold_streak(combo, history_slice)
-        return probs, cold_streaks
-
-    def _predict_kill_group(self, history):
-        if len(history) < 10:
-            return None
-        probs, cold_streaks = self._compute_probs_and_cold(history)
-        protected = set()
-        for combo in ["小单", "小双", "大单", "大双"]:
-            if cold_streaks[combo] >= 5:
-                protected.add(combo)
-        candidates = [c for c in ["小单", "小双", "大单", "大双"] if c not in protected]
-        if not candidates:
-            candidates = ["小单", "小双", "大单", "大双"]
-        return min(candidates, key=lambda c: probs[c])
+    def _get_opposite_combo(self, combo: str) -> str:
+        opposites = {
+            "小单": "大双",
+            "小双": "大单",
+            "大单": "小双",
+            "大双": "小单",
+        }
+        return opposites.get(combo, "小单")
 
     def predict(self, history: list) -> dict:
-        if len(history) < 10:
+        if len(history) < 3:
             return self._base_scores()
 
-        xd_history = self._add_data(history)
-        kill_group = self._predict_kill_group(xd_history)
-        if kill_group is None:
-            return self._base_scores()
+        latest = history[0]
+        prev = history[1]
+        prev2 = history[2]
+
+        nums_latest = latest["nums"]
+        nums_prev = prev["nums"]
+        nums_prev2 = prev2["nums"]
+        L = latest["total"]
+        y = L % 4
+
+        if y == 0:
+            tail1 = L % 10
+            tail2 = prev["total"] % 10
+            tail3 = prev2["total"] % 10
+            N = tail1 + tail2 + tail3
+        elif y == 1:
+            N = nums_prev[0] + nums_latest[1] + nums_latest[2]
+        elif y == 2:
+            N = nums_latest[0] + nums_prev[1] + nums_latest[2]
+        else:  # y == 3
+            N = nums_latest[0] + nums_latest[1] + nums_prev[2]
+
+        n_type = self._get_type_by_number(N)
+        kill = self._get_opposite_combo(n_type)
 
         scores = self._base_scores(0)
-        scores[kill_group] = 100
+        scores[kill] = 100
         return scores
 
 
-"""轻量集成器 - 多算法投票融合"""
-
+"""轻量集成器 - 多算法投票融合（保留兼容）"""
 class EnsembleVoter(BasePredictor):
     """加权投票集成，非主组算法，独立轻量实现"""
     name = "ensemble_voter"
@@ -658,11 +251,11 @@ class EnsembleVoter(BasePredictor):
                 pass
 
 
-# 全部 6 个算法类
-ALGO_CLASSES = [PiPredictor, ComplexDualKillPredictor, TianZiPredictor, FiveYPredictor, XiaoFengPredictor, XiaoDunPredictor]
+# 全部算法类（2套吮欲杀组算法）
+ALGO_CLASSES = [ShunYuAlgo1Predictor, ShunYuAlgo2Predictor]
 
 class KillGroupPredictor:
-    """基于 6 种算法历史杀组胜率选择器的杀组预测器"""
+    """基于 2 套吮欲杀组算法历史胜率选择器的杀组预测器"""
     def __init__(self):
         self.predictors = []
         for cls in ALGO_CLASSES:
@@ -700,8 +293,9 @@ class KillGroupPredictor:
         """
         history: list of dict with keys: size, odd_even, total, nums, issue, dragon_tiger
         返回: (建议杀的组合, 置信度)
-        策略: 使用最近 50 期数据，对 6 种算法在最近 20 期上做滚动回测，
+        策略: 使用最近 50 期数据，对 2 套吮欲杀组算法在最近 20 期上做滚动回测，
              选择杀组胜率最高的单一算法，返回其在当前窗口的预测结果。
+             无两期等待机制，错了直接倍投。
         """
         if not self.predictors or len(history) < 10:
             return "小单", 0.5
@@ -1518,7 +1112,7 @@ class SystemOrchestrator:
                 kill_confidence_for_bet = confidence
                 u.last_killed_group = kill_target
                 kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                active_descriptions.append(f"30算法杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
+                active_descriptions.append(f"吮欲杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
             except Exception as e:
                 logger.error(f"[用户 {u.user_id}] 杀组预测失败: {e}")
 
@@ -1582,7 +1176,7 @@ class SystemOrchestrator:
                 ]
                 if kill_target_for_bet:
                     notify_lines.extend([
-                        f"30算法杀组: `{kill_target_for_bet}`",
+                        f"吮欲杀组: `{kill_target_for_bet}`",
                         f"置信度: `{kill_confidence_for_bet:.0%}`",
                     ])
                 notify_lines.extend([
@@ -1674,7 +1268,7 @@ class SystemOrchestrator:
                 await event.answer("杀a球模式：根据最新一期开奖号码（a+b+c=和值），按 和值÷abc×e 取小数部分，从小数点后第2位起提取5个不重复数字作为杀码。A/B/C球共用同一组杀码，系统自动投递剩余数字。中奖倍率9.99。", alert=True)
                 return
             if data == "intro_kill":
-                await event.answer("30算法杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
+                await event.answer("杀组模式：集成2套吮欲杀组算法（算法1·基础定义带8条特殊规则、算法2·4y算法无特殊规则）。每期自动回测最近20期，选择胜率高的算法预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
                 return
             if data == "intro_extra":
                 await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0、27、1、26）以及豹子。", alert=True)
@@ -2240,7 +1834,7 @@ class SystemOrchestrator:
         await self.bot.start(bot_token=BOT_TOKEN)
         await self.register_handlers()
         await self.load_existing_users()
-        logger.info("PC28量化挂机中控系统已成功全面上线!")
+        logger.info("PC28量化挂机中控系统已成功全面上线! 杀组引擎: 2套吮欲算法动态选优")
         asyncio.create_task(self.poll_api())
         await self.bot.run_until_disconnected()
 
@@ -2256,7 +1850,7 @@ def start_bot_thread():
 
 with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已集成6种算法动态回测选优杀组模式（π算法、双杀组、天子、5Y、小枫、小盾）与同款报数播报功能。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
+    gr.Markdown("已集成2套吮欲杀组算法（算法1·基础定义、算法2·4y算法）动态回测选优，每期自动选择胜率高的算法进行杀组。无两期等待，错了直接倍投。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
 
