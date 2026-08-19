@@ -1480,7 +1480,7 @@ class SystemOrchestrator:
                 )
             elif data == "reset_pnl":
                 prev_pnl = u.risk_mgr.reset_daily_pnl()
-                u.save_state()
+                u.save()
                 await event.respond(
                     f"✅ 已清空今日盈亏\n"
                     f"• 原盈亏: `{prev_pnl:+.2f}`\n"
@@ -1852,20 +1852,24 @@ with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
     gr.Markdown("已集成2套吮欲杀组算法（算法1·基础定义、算法2·4y算法）动态回测选优，每期自动选择胜率高的算法进行杀组。无两期等待，错了直接倍投。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
     gr.Markdown("---")
-    gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
+    gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026 | 访问 /ui 进入面板</div>")
 
 # 用 FastAPI 包装 Gradio，提供 /health 端点供 Railway 等平台做健康检查
 fastapi_app = FastAPI(title="PC28量化智能挂机系统")
 
+@fastapi_app.get("/")
 @fastapi_app.get("/health")
 def health_check():
     return {"status": "healthy", "algorithms": len(ALGO_CLASSES)}
 
-fastapi_app = mount_gradio_app(fastapi_app, demo, path="/")
+# Gradio 挂载到 /ui，避免与根路径健康检查冲突
+fastapi_app = mount_gradio_app(fastapi_app, demo, path="/ui")
 
 if __name__ == "__main__":
     # 仅在直接运行时才启动 Telegram Bot 线程，避免部署平台导入模块时触发
     threading.Thread(target=start_bot_thread, daemon=True).start()
     port = int(os.getenv("PORT", "7860"))
     logger.info(f"启动 Gradio/FastAPI 服务，监听 0.0.0.0:{port}")
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="warning")
+    logger.info(f"健康检查: http://0.0.0.0:{port}/ 或 /health")
+    logger.info(f"Gradio 面板: http://0.0.0.0:{port}/ui")
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="info")
