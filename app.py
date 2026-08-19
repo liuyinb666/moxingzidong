@@ -7,6 +7,7 @@ import asyncio
 import logging
 import threading
 import random
+import gradio as gr
 from dataclasses import dataclass
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional, List, Dict, Any
@@ -77,7 +78,16 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - 
 logger = logging.getLogger(__name__)
 
 # ==================== 吮欲杀组算法（从 2期杀组.html 移植）====================
+class BasePredictor:
+    """所有预测器的基类"""
+    def _base_scores(self, default=50):
+        return {"大单": default, "大双": default, "小单": default, "小双": default}
 
+    def update(self, actual: dict):
+        pass
+
+    def predict(self, history: list) -> dict:
+        raise NotImplementedError
 class ShunYuAlgo1Predictor(BasePredictor):
     """吮欲算法1·基础定义（4y分组 + 8条特殊规则）"""
     name = "shunyu_algo1"
