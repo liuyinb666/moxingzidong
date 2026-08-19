@@ -300,12 +300,17 @@ class KillGroupPredictor:
         """
         history: list of dict with keys: size, odd_even, total, nums, issue, dragon_tiger
         返回: (建议杀的组合, 置信度)
-        策略: 使用最近 50 期数据，对 2 套吮欲杀组算法在最近 20 期上做滚动回测，
-             选择杀组胜率最高的单一算法，返回其在当前窗口的预测结果。
-             无两期等待机制，错了直接倍投。
         """
-        if not self.predictors or len(history) < 10:
-            return "小单", 0.5
+        # 数据不足时，使用算法1（而不是硬编码"小单"）
+        if not self.predictors or len(history) < 3:
+            try:
+                algo1 = ShunYuAlgo1Predictor()
+                scores = algo1.predict(history)
+                best = max(scores, key=scores.get)
+                return best, 0.6
+            except Exception:
+                import random
+                return random.choice(COMBOS), 0.5
 
         best_predictor = None
         best_rate = -1.0
@@ -320,25 +325,26 @@ class KillGroupPredictor:
                 logger.warning(f"[杀组回测] 算法 {getattr(p, 'name', p.__class__.__name__)} 回测失败: {e}")
 
         if best_predictor is None:
-            return "小单", 0.5
+            # 回测全部失败，回退到算法1
+            try:
+                algo1 = ShunYuAlgo1Predictor()
+                scores = algo1.predict(history[:50])
+                best = max(scores, key=scores.get)
+                return best, 0.5
+            except Exception:
+                import random
+                return random.choice(COMBOS), 0.5
 
         try:
             scores = best_predictor.predict(history[:50])
             best = self._get_kill(scores)
         except Exception:
-            return "小单", 0.5
+            import random
+            return random.choice(COMBOS), 0.5
 
         confidence = min(0.99, max(0.25, best_rate))
         logger.info(f"[杀组选择器] 使用 {getattr(best_predictor, 'name', best_predictor.__class__.__name__)} -> 杀 {best} (胜率 {best_rate:.0%})")
         return best, confidence
-
-# 全局杀组预测器实例
-kill_group_predictor = KillGroupPredictor()
-
-
-# ==================== ABC杀码（小鶴神 v9.0 — 每球1000精英模型） ====================
-KILL_MODELS = {}
-
 def create_advanced_predictor(depth, offset, weight, formula_type, step):
     """单个精英预测器：基于历史球号的加权公式"""
     def predictor(history_balls):
@@ -1844,6 +1850,16 @@ class SystemOrchestrator:
         await self.bot.start(bot_token=BOT_TOKEN)
         await self.register_handlers()
         await self.load_existing_users()
+        # ========== 启动时批量预填充历史数据 ==========
+        initial_data = await DataFetcher.fetch_history_list()
+        if initial_data:
+            parsed = DataFetcher.parse_history(initial_data)
+            for uid, u in self.users.items():
+                if u.is_logged_in:
+                    u.history = parsed
+                    u.save()
+                    logger.info(f"[预填充] 用户 {uid} 历史数据已填充 {len(parsed)} 期")
+        # ========== 预填充结束 ==========
         logger.info("PC28量化挂机中控系统已成功全面上线! 杀组引擎: 2套吮欲算法动态选优")
         asyncio.create_task(self.poll_api())
         await self.bot.run_until_disconnected()
