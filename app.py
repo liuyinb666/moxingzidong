@@ -11,13 +11,9 @@ from dataclasses import dataclass
 from datetime import datetime, date, timezone, timedelta
 from typing import Optional, List, Dict, Any
 import aiohttp
-import gradio as gr
 import uvicorn
-import numpy as np
-import pandas as pd
 from collections import Counter
 from fastapi import FastAPI
-from gradio import mount_gradio_app
 from telethon import TelegramClient, events, Button
 from telethon.errors import SessionPasswordNeededError, PhoneCodeExpiredError, PhoneCodeInvalidError
 
@@ -66,7 +62,8 @@ API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-DATA_API_URL = "https://pc28.help/api/kj.json?nbr=100"
+API_URL = "https://yu28.top/api/kj.json?nbr=100"
+API_KEY = "yu28_0889c78ad74725b7"
 SESSIONS_DIR = "telegram_sessions"
 USER_DATA_DIR = "user_data"
 
@@ -771,11 +768,14 @@ class DataFetcher:
     @staticmethod
     async def fetch_history_list():
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(DATA_API_URL, timeout=15) as resp:
+            headers = {"Authorization": f"Bearer {API_KEY}", "X-API-Key": API_KEY}
+            async with aiohttp.ClientSession(headers=headers) as session:
+                async with session.get(API_URL, timeout=15) as resp:
                     if resp.status == 200:
                         res = await resp.json()
                         return res.get("data", [])
+                    else:
+                        logger.warning(f"API 返回状态码: {resp.status}")
         except Exception as e:
             logger.error(f"网络抓取异常: {e}")
             return []
@@ -1852,24 +1852,32 @@ with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
     gr.Markdown("已集成2套吮欲杀组算法（算法1·基础定义、算法2·4y算法）动态回测选优，每期自动选择胜率高的算法进行杀组。无两期等待，错了直接倍投。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
     gr.Markdown("---")
-    gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026 | 访问 /ui 进入面板</div>")
+    gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026 | 面板地址: /gradio</div>")
 
 # 用 FastAPI 包装 Gradio，提供 /health 端点供 Railway 等平台做健康检查
-fastapi_app = FastAPI(title="PC28量化智能挂机系统")
+# 纯 FastAPI 应用入口，Gradio 稍后挂载
+app = FastAPI(title="PC28量化智能挂机系统")
 
-@fastapi_app.get("/")
-@fastapi_app.get("/health")
+@app.get("/")
+@app.head("/")
+@app.get("/health")
+@app.head("/health")
+@app.get("/ping")
+@app.head("/ping")
 def health_check():
-    return {"status": "healthy", "algorithms": len(ALGO_CLASSES)}
+    return {"status": "ok", "algorithms": len(ALGO_CLASSES)}
 
-# Gradio 挂载到 /ui，避免与根路径健康检查冲突
-fastapi_app = mount_gradio_app(fastapi_app, demo, path="/ui")
+# Gradio 挂载到 /gradio 子路径，完全隔离
 
 if __name__ == "__main__":
     # 仅在直接运行时才启动 Telegram Bot 线程，避免部署平台导入模块时触发
     threading.Thread(target=start_bot_thread, daemon=True).start()
     port = int(os.getenv("PORT", "7860"))
-    logger.info(f"启动 Gradio/FastAPI 服务，监听 0.0.0.0:{port}")
+    logger.info(f"启动服务，监听 0.0.0.0:{port} | 健康检查: / /health /ping")
     logger.info(f"健康检查: http://0.0.0.0:{port}/ 或 /health")
     logger.info(f"Gradio 面板: http://0.0.0.0:{port}/ui")
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="info")
+    try:
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info", access_log=True)
+    except Exception as e:
+        logger.error(f"Uvicorn 启动失败: {e}")
+        raise
