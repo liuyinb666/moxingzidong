@@ -175,9 +175,9 @@ RANGE_POOL = generate_range_pool()
 
 class KillGroupPredictor:
     @staticmethod
-    def predict_kill(history: List[dict]) -> str:
+    def predict_kill(history: List[dict]) -> tuple[str, float]:
         if len(history) < 2:
-            return "小单"
+            return "小单", 0.5
         max_test = min(27, len(history) - 1)
         best_range = (0.25, 0.55)
         best_hits = -1
@@ -195,7 +195,8 @@ class KillGroupPredictor:
                 best_range = (rmin, rmax)
 
         latest = history[0]
-        return predict_next_period(latest['issue'], latest['sum'], best_range[0], best_range[1])
+        confidence = best_hits / max_test if max_test > 0 else 0.5
+        return predict_next_period(latest['issue'], latest['sum'], best_range[0], best_range[1]), confidence
 
 
 def create_advanced_predictor(depth, offset, weight, formula_type, step):
@@ -473,8 +474,7 @@ class UserState:
         self.kill_bet_amount = 100.0
         self.kill_martingale_multiplier = 2.0
         self.kill_consecutive_losses = 0            # 最近3期杀组记录，避免连杀同一组合       # 上期实际杀的组合
-        self.kill_last_settled_issue = "" # 上期已结算期号\n        self.kill_history = []  # 杀组最近预测记录，防止连续同杀
-
+        self.kill_last_settled_issue = "" # 上期已结算期号\n
         # 附加下注特码与豹子配置（特码 0/27/1/26 各自独立）
         self.extra_special_numbers = []  # 例: ["0", "27", "1", "26"]
         self.extra_bauzi = False
@@ -926,7 +926,6 @@ class SystemOrchestrator:
 
         # 重置上期实际下注记录
         u.last_ball_kills = {}
-        u.last_killed_group = ""
 
         # ========== 1. 生成所有预测（ABC球 + 杀组） ==========
         # ABC杀球模式：使用小鶴神精英模型（每球1000模型选优，支持自定义杀码数）
@@ -960,24 +959,13 @@ class SystemOrchestrator:
         kill_multiplier = 1.0
         if "kill" in u.selected_modes and u.kill_enabled:
             try:
-                algo_history = convert_to_algo_history(u.history)
-                kill_target, confidence = kill_group_predictor.predict_kill(algo_history)
-
-                # 避免连续3期杀同一组合
-                u.kill_history.append(kill_target)
-                if len(u.kill_history) > 3:
-                    u.kill_history.pop(0)
-                if len(u.kill_history) == 3 and len(set(u.kill_history)) == 1:
-                    other = [c for c in COMBOS if c != kill_target]
-                    kill_target = random.choice(other)
-                    u.kill_history = [kill_target]
-                    logger.info(f"[用户 {u.user_id}] 连杀3期同一组合，强制换杀: {kill_target}")
+                kill_target, confidence = kill_group_predictor.predict_kill(u.history)
 
                 kill_target_for_bet = kill_target
                 kill_confidence_for_bet = confidence
-                u.last_killed_group = kill_target
+                u._last_kill_target = kill_target
                 kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                active_descriptions.append(f"吮欲杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
+                active_descriptions.append(f"区间杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
             except Exception as e:
                 logger.error(f"[用户 {u.user_id}] 杀组预测失败: {e}")
 
@@ -1041,7 +1029,7 @@ class SystemOrchestrator:
                 ]
                 if kill_target_for_bet:
                     notify_lines.extend([
-                        f"吮欲杀组: `{kill_target_for_bet}`",
+                        f"区间杀组: `{kill_target_for_bet}`",
                         f"置信度: `{kill_confidence_for_bet:.0%}`",
                     ])
                 notify_lines.extend([
@@ -1133,7 +1121,7 @@ class SystemOrchestrator:
                 await event.answer("杀a球模式：根据最新一期开奖号码（a+b+c=和值），按 和值÷abc×e 取小数部分，从小数点后第2位起提取5个不重复数字作为杀码。A/B/C球共用同一组杀码，系统自动投递剩余数字。中奖倍率9.99。", alert=True)
                 return
             if data == "intro_kill":
-                await event.answer("杀组模式：集成2套吮欲杀组算法（算法1·基础定义带8条特殊规则、算法2·4y算法无特殊规则）。每期自动回测最近20期，选择胜率高的算法预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
+                await event.answer("杀组模式：基于区间优化算法，回测历史27期选取最优区间，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
                 return
             if data == "intro_extra":
                 await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0、27、1、26）以及豹子。", alert=True)
@@ -1600,11 +1588,11 @@ class SystemOrchestrator:
                                 u.last_ball_kills = {}
 
                             # 30算法杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32）
-                            if "kill" in u.selected_modes and u.kill_enabled and u.last_killed_group:
+                            if "kill" in u.selected_modes and u.kill_enabled and hasattr(u, "_last_kill_target"):
                                 if u.kill_last_settled_issue != data.issue_id:
                                     u.kill_last_settled_issue = data.issue_id
                                     actual_combo = data.combination
-                                    last_kill = u.last_killed_group
+                                    last_kill = u._last_kill_target
                                     multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
                                     single_bet = u.kill_bet_amount * multiplier
                                     cost = 3 * single_bet  # 买3个组合
@@ -1642,6 +1630,8 @@ class SystemOrchestrator:
                                         )
                                     except:
                                         pass
+                                    if hasattr(u, "_last_kill_target"):
+                                        delattr(u, "_last_kill_target")
 
                             u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
                             if len(u.history) > 120:
@@ -1709,7 +1699,7 @@ class SystemOrchestrator:
                     u.save()
                     logger.info(f"[预填充] 用户 {uid} 历史数据已填充 {len(parsed)} 期")
         # ========== 预填充结束 ==========
-        logger.info("PC28量化挂机中控系统已成功全面上线! 杀组引擎: 2套吮欲算法动态选优")
+        logger.info("PC28量化挂机中控系统已成功全面上线! 杀组引擎: 区间优化算法（自动回测选优）")
         asyncio.create_task(self.poll_api())
         await self.bot.run_until_disconnected()
 
@@ -1725,7 +1715,7 @@ def start_bot_thread():
 
 with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已集成2套吮欲杀组算法（算法1·基础定义、算法2·4y算法）动态回测选优，每期自动选择胜率高的算法进行杀组。无两期等待，错了直接倍投。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
+    gr.Markdown("区间预测（算法1·基础定义、算法2·4y算法）动态回测选优，每期自动选择胜率高的算法进行杀组。无两期等待，错了直接倍投。ABC杀球模式使用小鶴神精英模型（每球1000模型、支持自定义杀码数）、可配置自定义倍投序列（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子独立下注。")
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026 | 面板地址: /gradio</div>")
 
