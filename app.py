@@ -526,7 +526,7 @@ class UserState:
                         self.kill_bet_amount = data.get("kill_bet_amount", 100.0)
                         self.kill_martingale_multiplier = data.get("kill_martingale_multiplier", 2.0)
                         self.kill_consecutive_losses = data.get("kill_consecutive_losses", 0)
-                                                                        self.kill_last_settled_issue = data.get("kill_last_settled_issue", "")
+                        self.kill_last_settled_issue = data.get("kill_last_settled_issue", "")
                         # 报数
                         self.broadcast_enabled = data.get("broadcast_enabled", False)
                         self.broadcast_channel = data.get("broadcast_channel", "")
