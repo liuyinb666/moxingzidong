@@ -77,6 +77,13 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
+# ==================== 全局运行池 ====================
+# ABC精英模型池：_build_abc_models() 会清空并填充该字典
+KILL_MODELS: Dict[str, Any] = {}
+
+# 健康检查兼容变量
+ALGO_CLASSES = []
+
 # ==================== 杀组算法（区间优化）====================
 # ==================== 杀组预测算法 ====================
 ALL_TYPES = ['小双', '小单', '大双', '大单']
@@ -466,7 +473,7 @@ class UserState:
         self.kill_bet_amount = 100.0
         self.kill_martingale_multiplier = 2.0
         self.kill_consecutive_losses = 0            # 最近3期杀组记录，避免连杀同一组合       # 上期实际杀的组合
-        self.kill_last_settled_issue = "" # 上期已结算期号
+        self.kill_last_settled_issue = "" # 上期已结算期号\n        self.kill_history = []  # 杀组最近预测记录，防止连续同杀
 
         # 附加下注特码与豹子配置（特码 0/27/1/26 各自独立）
         self.extra_special_numbers = []  # 例: ["0", "27", "1", "26"]
