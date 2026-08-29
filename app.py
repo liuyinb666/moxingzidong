@@ -77,274 +77,120 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
 
-# ==================== 吮欲杀组算法（从 2期杀组.html 移植）====================
-class BasePredictor:
-    """所有预测器的基类"""
-    def _base_scores(self, default=50):
-        return {"大单": default, "大双": default, "小单": default, "小双": default}
+# ==================== 杀组算法（区间优化）====================
+# ==================== 杀组预测算法 ====================
+ALL_TYPES = ['小双', '小单', '大双', '大单']
+SEQUENCES = [
+    [0, 3, 9, 12, 15, 18, 21, 24, 27],
+    [1, 4, 7, 10, 13, 16, 19, 22, 25],
+    [2, 5, 8, 11, 14, 17, 20, 23, 26]
+]
+COMBINATION_RULES = {
+    'sameSequence': {
+        '小双': ['小双', '大双', '大单'],
+        '小单': ['小单', '大单', '大双'],
+        '大双': ['大双', '小双', '小单'],
+        '大单': ['大单', '小单', '小双']
+    },
+    'diffSequence': {
+        '小双': ['小双', '小单', '大单'],
+        '小单': ['小单', '小双', '大双'],
+        '大双': ['大双', '大单', '小单'],
+        '大单': ['大单', '大双', '小双']
+    }
+}
 
-    def update(self, actual: dict):
-        pass
+def get_type_from_sum(sum_val: int) -> str:
+    size = '小' if sum_val < 14 else '大'
+    parity = '双' if sum_val % 2 == 0 else '单'
+    return size + parity
 
-    def predict(self, history: list) -> dict:
-        raise NotImplementedError
-class ShunYuAlgo1Predictor(BasePredictor):
-    """吮欲算法1·基础定义（4y分组 + 8条特殊规则）"""
-    name = "shunyu_algo1"
+def mulberry32(seed: int):
+    s = seed & 0xFFFFFFFF
+    def next_():
+        nonlocal s
+        s = (s + 0x6D2B79F5) & 0xFFFFFFFF
+        t = (s ^ (s >> 15)) & 0xFFFFFFFF
+        t = (t * (s | 1)) & 0xFFFFFFFF
+        t = (t ^ (t + ((t ^ (t >> 7)) * (61 | t)))) & 0xFFFFFFFF
+        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
+    return next_
 
-    def _get_type_by_number(self, n: int) -> str:
-        if n < 0 or n > 27:
-            return '未知'
-        is_small = n <= 13
-        is_odd = n % 2 == 1
-        if is_small:
-            return '小单' if is_odd else '小双'
-        else:
-            return '大单' if is_odd else '大双'
+def get_sequence_indexes(num: int) -> List[int]:
+    idxs = []
+    for i, seq in enumerate(SEQUENCES):
+        if num in seq:
+            idxs.append(i)
+    return idxs
 
-    def _get_opposite_combo(self, combo: str) -> str:
-        """取组合的反面：大小相反，单双相反"""
-        opposites = {
-            "小单": "大双",
-            "小双": "大单",
-            "大单": "小双",
-            "大双": "小单",
-        }
-        return opposites.get(combo, "小单")
+def is_same_sequence(num1: int, num2: int) -> bool:
+    seq1 = get_sequence_indexes(num1)
+    seq2 = get_sequence_indexes(num2)
+    return any(i in seq2 for i in seq1)
 
-    def predict(self, history: list) -> dict:
-        if len(history) < 3:
-            return self._base_scores()
+def split_and_sum_str(s: str) -> int:
+    s = s.replace('.', '')
+    return sum(int(c) for c in s)
 
-        latest = history[0]
-        prev = history[1]
-        prev2 = history[2]
+def predict_next_period(current_expect: str, current_sum: int, range_min: float = 0.25, range_max: float = 0.55) -> str:
+    match = re.search(r'\d+', current_expect)
+    seed = int(match.group()) if match else hash(current_expect) & 0xFFFFFFFF
+    rnd = mulberry32(seed)
 
-        nums_latest = latest["nums"]
-        nums_prev = prev["nums"]
-        nums_prev2 = prev2["nums"]
-        L = latest["total"]
-        y = L % 4
+    random_num = rnd() * (range_max - range_min) + range_min
+    product = random_num * current_sum
+    rounded = round(product, 3)
+    final_sum = split_and_sum_str(str(rounded))
+    final_type = get_type_from_sum(final_sum)
 
-        if y == 0:
-            tail1 = L % 10
-            tail2 = prev["total"] % 10
-            tail3 = prev2["total"] % 10
-            N = tail1 + tail2 + tail3
-        elif y == 1:
-            N = nums_prev[0] + nums_latest[1] + nums_latest[2]
-        elif y == 2:
-            N = nums_latest[0] + nums_prev[1] + nums_latest[2]
-        else:  # y == 3
-            N = nums_latest[0] + nums_latest[1] + nums_prev[2]
+    rand_str = f"{random_num:.8f}".split('.')[1]
+    rand_first_three = rand_str[:3]
+    rand_sum = split_and_sum_str(rand_first_three)
+    same_seq = is_same_sequence(rand_sum, current_sum)
 
-        n_type = self._get_type_by_number(N)
+    rule_key = 'sameSequence' if same_seq else 'diffSequence'
+    predict_groups = COMBINATION_RULES[rule_key][final_type]
+    return next(t for t in ALL_TYPES if t not in predict_groups)
 
-        # 8条特殊规则：直接修改 n_type（被杀的是 n_type 的反面）
-        if N == 15:
-            n_type = '小双'   # 原规则：小+双 → 杀大单
-        else:
-            if L == 13 or L == 14:
-                if N < 14:
-                    n_type = '小双'   # 小+双 → 杀大单
-                elif N > 13:
-                    n_type = '大单'   # 大+单 → 杀小双
-            elif L == 23:
-                n_type = '大单'       # 大+单 → 杀小双
-            elif L == 24:
-                n_type = '小双'       # 小+双 → 杀大单
-            elif L == 5:
-                n_type = '小单'       # 小+单 → 杀大双
-            elif L == 4:
-                n_type = '小双'       # 小+双 → 杀大单
-            elif L == 12:
-                n_type = '小单'       # 小+单 → 杀大双
-            elif L == 15:
-                n_type = '大双'       # 大+双 → 杀小单
+def generate_range_pool():
+    pool = []
+    step = 0.01
+    min_width = 0.2
+    max_width = 0.5
+    vals = [round(i * step, 2) for i in range(0, 101)]
+    for min_ in vals:
+        for max_ in vals:
+            if max_ - min_ >= min_width and max_ - min_ <= max_width:
+                pool.append((min_, max_))
+    return pool
 
-        kill = self._get_opposite_combo(n_type)
-        scores = self._base_scores(0)
-        scores[kill] = 100
-        return scores
-
-
-class ShunYuAlgo2Predictor(BasePredictor):
-    """吮欲算法2·4y算法（无特殊规则）"""
-    name = "shunyu_algo2"
-
-    def _get_type_by_number(self, n: int) -> str:
-        if n < 0 or n > 27:
-            return '未知'
-        is_small = n <= 13
-        is_odd = n % 2 == 1
-        if is_small:
-            return '小单' if is_odd else '小双'
-        else:
-            return '大单' if is_odd else '大双'
-
-    def _get_opposite_combo(self, combo: str) -> str:
-        opposites = {
-            "小单": "大双",
-            "小双": "大单",
-            "大单": "小双",
-            "大双": "小单",
-        }
-        return opposites.get(combo, "小单")
-
-    def predict(self, history: list) -> dict:
-        if len(history) < 3:
-            return self._base_scores()
-
-        latest = history[0]
-        prev = history[1]
-        prev2 = history[2]
-
-        nums_latest = latest["nums"]
-        nums_prev = prev["nums"]
-        nums_prev2 = prev2["nums"]
-        L = latest["total"]
-        y = L % 4
-
-        if y == 0:
-            tail1 = L % 10
-            tail2 = prev["total"] % 10
-            tail3 = prev2["total"] % 10
-            N = tail1 + tail2 + tail3
-        elif y == 1:
-            N = nums_prev[0] + nums_latest[1] + nums_latest[2]
-        elif y == 2:
-            N = nums_latest[0] + nums_prev[1] + nums_latest[2]
-        else:  # y == 3
-            N = nums_latest[0] + nums_latest[1] + nums_prev[2]
-
-        n_type = self._get_type_by_number(N)
-        kill = self._get_opposite_combo(n_type)
-
-        scores = self._base_scores(0)
-        scores[kill] = 100
-        return scores
-
-
-"""轻量集成器 - 多算法投票融合（保留兼容）"""
-class EnsembleVoter(BasePredictor):
-    """加权投票集成，非主组算法，独立轻量实现"""
-    name = "ensemble_voter"
-
-    def __init__(self, predictors: list, weights: list = None):
-        self.predictors = predictors
-        self.weights = weights or [1.0] * len(predictors)
-        self.accuracy_log = {getattr(p, 'name', p.__class__.__name__): [] for p in predictors}
-
-    def predict(self, history: list) -> dict:
-        scores = {"大单": 0, "大双": 0, "小单": 0, "小双": 0}
-        total_w = 0
-        for p, w in zip(self.predictors, self.weights):
-            try:
-                pred = p.predict(history)
-                for k in scores:
-                    scores[k] += pred.get(k, 50) * w
-                total_w += w
-            except Exception:
-                continue
-        if total_w == 0:
-            return self._base_scores()
-        return {k: v/total_w for k, v in scores.items()}
-
-    def update(self, actual: dict):
-        for p in self.predictors:
-            try:
-                p.update(actual)
-            except Exception:
-                pass
-
-
-# 全部算法类（2套吮欲杀组算法）
-ALGO_CLASSES = [ShunYuAlgo1Predictor, ShunYuAlgo2Predictor]
+RANGE_POOL = generate_range_pool()
 
 class KillGroupPredictor:
-    """基于 2 套吮欲杀组算法历史胜率选择器的杀组预测器"""
-    def __init__(self):
-        self.predictors = []
-        for cls in ALGO_CLASSES:
-            try:
-                self.predictors.append(cls())
-            except Exception as e:
-                logger.warning(f"[杀组] 算法 {cls.__name__} 实例化失败，已跳过: {e}")
-        logger.info(f"杀组预测器已加载 {len(self.predictors)} 个算法引擎")
-
     @staticmethod
-    def _get_kill(scores: dict) -> str:
-        return max(scores, key=scores.get)
+    def predict_kill(history: List[dict]) -> str:
+        if len(history) < 2:
+            return "小单"
+        max_test = min(27, len(history) - 1)
+        best_range = (0.25, 0.55)
+        best_hits = -1
 
-    def _backtest_win_rate(self, predictor, history: list) -> float:
-        """取最近 50 期，在最近 20 期上做滚动回测，返回杀组胜率"""
-        window = history[:50]
-        if len(window) < 20:
-            return 0.0
-        wins = 0
-        total = 0
-        for i in range(20):
-            train = window[i + 1:50]
-            actual = window[i]["size"] + window[i]["odd_even"]
-            try:
-                scores = predictor.predict(train)
-                predicted = self._get_kill(scores)
-            except Exception:
-                continue
-            total += 1
-            if predicted != actual:
-                wins += 1
-        return wins / total if total > 0 else 0.0
+        for rmin, rmax in RANGE_POOL:
+            hits = 0
+            for i in range(max_test):
+                target = history[i]
+                prev = history[i + 1]
+                kill = predict_next_period(prev['issue'], prev['sum'], rmin, rmax)
+                if target['type'] != kill:
+                    hits += 1
+            if hits > best_hits:
+                best_hits = hits
+                best_range = (rmin, rmax)
 
-    def predict_kill(self, history: list) -> tuple[str, float]:
-        """
-        history: list of dict with keys: size, odd_even, total, nums, issue, dragon_tiger
-        返回: (建议杀的组合, 置信度)
-        """
-        # 数据不足时，使用算法1（而不是硬编码"小单"）
-        if not self.predictors or len(history) < 3:
-            try:
-                algo1 = ShunYuAlgo1Predictor()
-                scores = algo1.predict(history)
-                best = max(scores, key=scores.get)
-                return best, 0.6
-            except Exception:
-                import random
-                return random.choice(COMBOS), 0.5
+        latest = history[0]
+        return predict_next_period(latest['issue'], latest['sum'], best_range[0], best_range[1])
 
-        best_predictor = None
-        best_rate = -1.0
-        for p in self.predictors:
-            try:
-                rate = self._backtest_win_rate(p, history)
-                logger.info(f"[杀组回测] {getattr(p, 'name', p.__class__.__name__)} 杀组胜率 {rate:.2%}")
-                if rate > best_rate:
-                    best_rate = rate
-                    best_predictor = p
-            except Exception as e:
-                logger.warning(f"[杀组回测] 算法 {getattr(p, 'name', p.__class__.__name__)} 回测失败: {e}")
 
-        if best_predictor is None:
-            # 回测全部失败，回退到算法1
-            try:
-                algo1 = ShunYuAlgo1Predictor()
-                scores = algo1.predict(history[:50])
-                best = max(scores, key=scores.get)
-                return best, 0.5
-            except Exception:
-                import random
-                return random.choice(COMBOS), 0.5
-
-        try:
-            scores = best_predictor.predict(history[:50])
-            best = self._get_kill(scores)
-        except Exception:
-            import random
-            return random.choice(COMBOS), 0.5
-
-        confidence = min(0.99, max(0.25, best_rate))
-        logger.info(f"[杀组选择器] 使用 {getattr(best_predictor, 'name', best_predictor.__class__.__name__)} -> 杀 {best} (胜率 {best_rate:.0%})")
-        return best, confidence
 def create_advanced_predictor(depth, offset, weight, formula_type, step):
     """单个精英预测器：基于历史球号的加权公式"""
     def predictor(history_balls):
@@ -619,9 +465,7 @@ class UserState:
         self.kill_enabled = False
         self.kill_bet_amount = 100.0
         self.kill_martingale_multiplier = 2.0
-        self.kill_consecutive_losses = 0
-        self.kill_history = []            # 最近3期杀组记录，避免连杀同一组合
-        self.last_killed_group = ""       # 上期实际杀的组合
+        self.kill_consecutive_losses = 0            # 最近3期杀组记录，避免连杀同一组合       # 上期实际杀的组合
         self.kill_last_settled_issue = "" # 上期已结算期号
 
         # 附加下注特码与豹子配置（特码 0/27/1/26 各自独立）
@@ -682,9 +526,7 @@ class UserState:
                         self.kill_bet_amount = data.get("kill_bet_amount", 100.0)
                         self.kill_martingale_multiplier = data.get("kill_martingale_multiplier", 2.0)
                         self.kill_consecutive_losses = data.get("kill_consecutive_losses", 0)
-                        self.kill_history = data.get("kill_history", [])
-                        self.last_killed_group = data.get("last_killed_group", "")
-                        self.kill_last_settled_issue = data.get("kill_last_settled_issue", "")
+                                                                        self.kill_last_settled_issue = data.get("kill_last_settled_issue", "")
                         # 报数
                         self.broadcast_enabled = data.get("broadcast_enabled", False)
                         self.broadcast_channel = data.get("broadcast_channel", "")
@@ -741,8 +583,8 @@ class UserState:
                         "kill_bet_amount": self.kill_bet_amount,
                         "kill_martingale_multiplier": self.kill_martingale_multiplier,
                         "kill_consecutive_losses": self.kill_consecutive_losses,
-                        "kill_history": self.kill_history,
-                        "last_killed_group": self.last_killed_group,
+                        
+                        
                         "kill_last_settled_issue": self.kill_last_settled_issue,
                         "broadcast_enabled": self.broadcast_enabled,
                         "broadcast_channel": self.broadcast_channel,
