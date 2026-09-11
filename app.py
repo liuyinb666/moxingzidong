@@ -64,9 +64,10 @@ COMBOS = ["大单", "小单", "大双", "小双"]
 # ==================== 2. 风控管理系统 ====================
 API_ID = int(os.getenv("API_ID", "0"))
 API_HASH = os.getenv("API_HASH", "")
+API_KEY = "yu28_0889c78ad74725b7"
 BOT_TOKEN = os.getenv("BOT_TOKEN", "")
 
-DATA_API_URL = "https://pc28.help/api/kj.json?nbr=100"
+DATA_API_URL = "https://yu28.top/api/kj.json?nbr=100"
 SESSIONS_DIR = "telegram_sessions"
 USER_DATA_DIR = "user_data"
 
@@ -201,15 +202,19 @@ class KillGroupPredictor:
             for i in range(max_test):
                 target = history[i]
                 prev = history[i + 1]
-                kill = predict_next_period(prev['issue'], prev['total'], rmin, rmax)
-                if target['size'] + target['odd_even'] != kill:
+                kill = predict_next_period(prev['issue'], prev['sum'], rmin, rmax)
+                # 从 target['type'] 获取大小单双
+                actual = target.get('type', '')
+                if not actual:
+                    actual = "大" if target.get('sum', 0) >= 14 else "小" + ("单" if target.get('sum', 0) % 2 else "双")
+                if actual != kill:
                     hits += 1
             if hits > best_hits:
                 best_hits = hits
                 best_range = (rmin, rmax)
 
         latest = history[0]
-        kill = predict_next_period(latest['issue'], latest['total'], best_range[0], best_range[1])
+        kill = predict_next_period(latest['issue'], latest['sum'], best_range[0], best_range[1])
         confidence = min(0.99, max(0.25, best_hits / max_test if max_test > 0 else 0.5))
         logger.info(f"[杀组预测] 区间回测命中 {best_hits}/{max_test}，选用区间 {best_range} -> 杀 {kill} (置信度 {confidence:.0%})")
         return kill, confidence
@@ -548,7 +553,8 @@ class DataFetcher:
     @staticmethod
     async def fetch_history_list():
         try:
-            async with aiohttp.ClientSession() as session:
+            headers = {"Authorization": f"Bearer {API_KEY}", "X-API-Key": API_KEY}
+            async with aiohttp.ClientSession(headers=headers) as session:
                 async with session.get(DATA_API_URL, timeout=15) as resp:
                     if resp.status == 200:
                         res = await resp.json()
@@ -578,44 +584,15 @@ class DataFetcher:
                 if len(nums) >= 3:
                     nums = nums[:3]
                     total = int(item.get("num", sum(nums)))
-                    combo = item.get("combination", get_type(total))
+                    combo = item.get("combination", "")
+                    if not combo:
+                        combo = "大" if total >= 14 else "小" + ("单" if total % 2 else "双")
                     parsed.append({"nums": nums, "sum": total, "type": combo, "issue": str(item.get("nbr", ""))})
             except:
                 pass
         return parsed
 
 # ==================== 4.5 杀组与播报辅助函数 ====================
-def convert_to_algo_history(parsed_history: list) -> list:
-    """将 parse_history 输出转换为 30 算法需要的格式"""
-    algo_hist = []
-    for rec in parsed_history:
-        nums = rec.get("nums", [])
-        total = rec.get("sum", 0)
-        combo = rec.get("type", "")
-        if len(combo) >= 2:
-            size, parity = combo[0], combo[1]
-        else:
-            size = "大" if total >= 14 else "小"
-            parity = "单" if total % 2 else "双"
-        if len(nums) >= 3:
-            if nums[0] > nums[2]:
-                dt = "龙"
-            elif nums[0] < nums[2]:
-                dt = "虎"
-            else:
-                dt = "和"
-        else:
-            dt = "和"
-        algo_hist.append({
-            "issue": rec.get("issue", ""),
-            "nums": nums,
-            "total": total,
-            "size": size,
-            "odd_even": parity,
-            "dragon_tiger": dt
-        })
-    return algo_hist
-
 def get_next_qihao(qihao):
     """根据当前期号计算下一期号（支持纯数字或末尾数字）"""
     s = str(qihao)
@@ -688,14 +665,14 @@ class SystemOrchestrator:
             return "✅ " if m in u_state.selected_modes else "⬜ "
         return [
             [Button.inline(f"{chk('ball')}启用 ABC杀球模式", data=b"toggle_mode_ball")],
-            [Button.inline(f"{chk('kill')}启用 30算法杀组模式", data=b"toggle_mode_kill")],
+            [Button.inline(f"{chk('kill')}启用 区间杀组模式", data=b"toggle_mode_kill")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
 
     def mode_intro_keyboard(self):
         return [
             [Button.inline("ABC球模式介绍", data=b"intro_ball")],
-            [Button.inline("30算法杀组模式介绍", data=b"intro_kill")],
+            [Button.inline("区间杀组模式介绍", data=b"intro_kill")],
             [Button.inline("特码与豹子介绍", data=b"intro_extra")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
@@ -799,8 +776,7 @@ class SystemOrchestrator:
             next_qihao = get_next_qihao(data.issue_id)
             rec = {'qihao': next_qihao, 'sum': data.num_value}
             try:
-                algo_history = convert_to_algo_history(u.history)
-                kill_target, _ = kill_group_predictor.predict_kill(algo_history)
+                kill_target, _ = kill_group_predictor.predict_kill(u.history)
                 rec['kill_target'] = kill_target
             except Exception:
                 rec['kill_target'] = '--'
@@ -863,20 +839,19 @@ class SystemOrchestrator:
             except Exception as e:
                 logger.error(f"[用户 {u.user_id}] ABC7码动态排除预测失败: {e}")
 
-        # 30算法杀组模式
+        # 区间杀组模式
         kill_target_for_bet = None
         kill_confidence_for_bet = 0.5
         kill_multiplier = 1.0
         if "kill" in u.selected_modes and u.kill_enabled:
             try:
-                algo_history = convert_to_algo_history(u.history)
-                kill_target, confidence = kill_group_predictor.predict_kill(algo_history)
+                kill_target, confidence = kill_group_predictor.predict_kill(u.history)
 
                 kill_target_for_bet = kill_target
                 kill_confidence_for_bet = confidence
                 u.last_killed_group = kill_target
                 kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                active_descriptions.append(f"30算法杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
+                active_descriptions.append(f"区间杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
             except Exception as e:
                 logger.error(f"[用户 {u.user_id}] 杀组预测失败: {e}")
 
@@ -940,7 +915,7 @@ class SystemOrchestrator:
                 ]
                 if kill_target_for_bet:
                     notify_lines.extend([
-                        f"30算法杀组: `{kill_target_for_bet}`",
+                        f"区间杀组: `{kill_target_for_bet}`",
                         f"置信度: `{kill_confidence_for_bet:.0%}`",
                     ])
                 notify_lines.extend([
@@ -969,7 +944,7 @@ class SystemOrchestrator:
                 f"• 绑定群组: `{len(u.groups)}` 个\n"
                 f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                 f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                f"• 30算法杀组: `{kill_status}`\n"
+                f"• 区间杀组: `{kill_status}`\n"
                 f"• 报数播报: `{bc_status}`\n"
                 f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                 f"--------------------",
@@ -1032,7 +1007,7 @@ class SystemOrchestrator:
                 await event.answer("杀a球模式：根据最新一期开奖号码（a+b+c=和值），按 和值÷abc×e 取小数部分，从小数点后第2位起提取5个不重复数字作为杀码。A/B/C球共用同一组杀码，系统自动投递剩余数字。中奖倍率9.99。", alert=True)
                 return
             if data == "intro_kill":
-                await event.answer("30算法杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
+                await event.answer("区间杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
                 return
             if data == "intro_extra":
                 await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0、27、1、26）以及豹子。", alert=True)
@@ -1096,13 +1071,13 @@ class SystemOrchestrator:
                 return
 
             if data == "kill_settings":
-                await event.edit("30算法杀组模式设置", buttons=self.kill_settings_keyboard(u))
+                await event.edit("区间杀组模式设置", buttons=self.kill_settings_keyboard(u))
                 return
 
             if data == "toggle_kill_enabled":
                 u.kill_enabled = not u.kill_enabled
                 u.save()
-                await event.edit("30算法杀组模式设置", buttons=self.kill_settings_keyboard(u))
+                await event.edit("区间杀组模式设置", buttons=self.kill_settings_keyboard(u))
                 return
 
             if data == "set_kill_amount":
@@ -1154,7 +1129,7 @@ class SystemOrchestrator:
                     f"• 绑定群组: `{len(u.groups)}` 个\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
                     f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
-                    f"• 30算法杀组: `{kill_status}`\n"
+                    f"• 区间杀组: `{kill_status}`\n"
                     f"• 报数播报: `{bc_status}`\n"
                     f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                     f"--------------------",
@@ -1481,7 +1456,7 @@ class SystemOrchestrator:
 
                                 u.last_ball_kills = {}
 
-                            # 30算法杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32）
+                            # 区间杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32）
                             if "kill" in u.selected_modes and u.kill_enabled and u.last_killed_group:
                                 if u.kill_last_settled_issue != data.issue_id:
                                     u.kill_last_settled_issue = data.issue_id
