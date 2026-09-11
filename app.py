@@ -797,10 +797,12 @@ class SystemOrchestrator:
         except Exception as e:
             logger.error(f"[用户 {u.user_id}] 播报失败: {e}")
 
-    async def handle_new_issue_bet(self, u: UserState, issue_id: str, latest_market_data: MarketData = None):
+    async def handle_new_issue_bet(self, u: UserState, issue_id: str, latest_market_data: MarketData = None, history_snapshot: list = None):
         """根据最新开奖数据生成下一期实际下注内容并发送"""
         if u.last_betted_issue == issue_id:
             return
+
+        history_for_pred = history_snapshot if history_snapshot is not None else u.history
 
         can_bet, reason = u.risk_mgr.can_bet()
         if not can_bet:
@@ -825,7 +827,7 @@ class SystemOrchestrator:
             count = 3  # 7码投注固定杀3个
             try:
                 preds = abc_manager.get_all_predictions(
-                    u.history,
+                    history_for_pred,
                     balls=[b_char.upper() for b_char in u.selected_balls]
                 )
                 for b_char in u.selected_balls:
@@ -845,7 +847,7 @@ class SystemOrchestrator:
         kill_multiplier = 1.0
         if "kill" in u.selected_modes and u.kill_enabled:
             try:
-                kill_target, confidence = kill_group_predictor.predict_kill(u.history)
+                kill_target, confidence = kill_group_predictor.predict_kill(history_for_pred)
 
                 kill_target_for_bet = kill_target
                 kill_confidence_for_bet = confidence
@@ -1407,8 +1409,13 @@ class SystemOrchestrator:
                 data = await DataFetcher.fetch_latest()
                 if data and data.issue_id != self.last_issue_id:
                     self.last_issue_id = data.issue_id
+                    full = await DataFetcher.fetch_history_list()
+                    parsed_history = DataFetcher.parse_history(full) if full else None
                     for uid, u in self.users.items():
                         if u.is_logged_in:
+                            if parsed_history:
+                                u.history = parsed_history
+                                u.save()
                             # 初始化本期各模式盈亏
                             total_abc_pnl = 0.0
                             kill_pnl = 0.0
@@ -1500,11 +1507,6 @@ class SystemOrchestrator:
                                     except:
                                         pass
 
-                            u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
-                            if len(u.history) > 120:
-                                u.history = u.history[:120]
-                            u.save()
-
                             # 报数播报（同款格式）
                             await self.do_broadcast(u, data)
 
@@ -1543,7 +1545,8 @@ class SystemOrchestrator:
 
                             if u.is_active:
                                 next_issue = get_next_qihao(data.issue_id)
-                                asyncio.create_task(self.handle_new_issue_bet(u, next_issue, data))
+                                history_snapshot = list(u.history)
+                                asyncio.create_task(self.handle_new_issue_bet(u, next_issue, data, history_snapshot))
             except Exception as e:
                 logger.error(f"轮询守护异常自动隔离: {e}")
 
@@ -1556,6 +1559,14 @@ class SystemOrchestrator:
         await self.bot.start(bot_token=BOT_TOKEN)
         await self.register_handlers()
         await self.load_existing_users()
+        # 预填充历史数据，与 bot.py 保持一致
+        initial = await DataFetcher.fetch_history_list()
+        if initial:
+            parsed = DataFetcher.parse_history(initial)
+            for u in self.users.values():
+                if u.is_logged_in:
+                    u.history = parsed
+                    u.save()
         logger.info("PC28量化挂机中控系统已上线（区间优化杀组算法）!")
         asyncio.create_task(self.poll_api())
         await self.bot.run_until_disconnected()
