@@ -311,6 +311,14 @@ class RiskManager:
         self._ensure_daily_reset()
         self.daily_pnl += amount
 
+    def reset_daily_pnl(self):
+        """手动清空今日实时盈亏"""
+        self._ensure_daily_reset()
+        old = self.daily_pnl
+        self.daily_pnl = 0.0
+        logger.info(f"手动重置每日盈亏: {old:+.2f} -> 0.00")
+        return old
+
     def to_dict(self):
         self._ensure_daily_reset()
         return {
@@ -499,6 +507,12 @@ class UserState:
             except Exception as e:
                 logger.error(f"保存用户 {self.user_id} 档案出错: {e}")
 
+    def reset_daily_pnl(self):
+        """重置今日实时盈亏并保存"""
+        old = self.risk_mgr.reset_daily_pnl()
+        self.save()
+        return old
+
     async def try_reconnect(self):
         session_path = os.path.join(SESSIONS_DIR, f"user_{self.user_id}")
         if self.is_logged_in and os.path.exists(f"{session_path}.session"):
@@ -622,7 +636,7 @@ class SystemOrchestrator:
             [Button.inline("➕ 绑定群组", data=b"add_g"), Button.inline("➖ 移除群组", data=b"del_g"), Button.inline("📋 群组列表", data=b"list_g")],
             [Button.inline(f"⏱ 投递延迟: {u_state.custom_delay}s", data=b"set_delay"), Button.inline("📝 设置自定义尾缀", data=b"set_suffix")],
             [Button.inline("📖 模式介绍与说明", data=b"mode_intro_menu")],
-            [Button.inline("📈 实时收益战报", data=b"stats")]
+            [Button.inline("🔄 重置今日盈亏", data=b"reset_pnl"), Button.inline("📈 实时收益战报", data=b"stats")]
         ]
 
     def mode_selection_keyboard(self, u_state: UserState):
@@ -1159,6 +1173,14 @@ class SystemOrchestrator:
             elif data == "set_stop_loss":
                 self.user_login_states[sid] = "WAIT_STOP_LOSS"
                 await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`\n请输入新金额(输入 0 为不限制):")
+            elif data == "reset_pnl":
+                old_pnl = u.reset_daily_pnl()
+                await event.respond(
+                    f"✅ 已重置今日实时盈亏\n"
+                    f"重置前: `{old_pnl:+.2f}`\n"
+                    f"重置后: `0.00`",
+                    buttons=self.main_keyboard(u)
+                )
             elif data == "stats":
                 rm = u.risk_mgr
                 current_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
@@ -1527,18 +1549,42 @@ class SystemOrchestrator:
         await self.bot.run_until_disconnected()
 
 # ==================== 6. Gradio 后台控制台 ====================
+# 全局引用，让 Gradio 控件可以操作后台 orchestrator
+_orchestrator: Optional[SystemOrchestrator] = None
+
+
 def start_bot_thread():
+    global _orchestrator
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     orchestrator = SystemOrchestrator()
+    _orchestrator = orchestrator
     try:
         loop.run_until_complete(orchestrator.start())
     except Exception as e:
         logger.error(f"Bot 运行异常: {e}")
 
+
+def gradio_reset_daily_pnl():
+    """Gradio 按钮回调：清空所有用户的今日实时盈亏"""
+    if _orchestrator is None:
+        return "系统尚未启动，无法重置"
+    results = []
+    for uid, u in list(_orchestrator.users.items()):
+        old = u.reset_daily_pnl()
+        results.append(f"用户 {uid}: {old:+.2f} -> 0.00")
+    if not results:
+        return "当前没有用户数据，已清空 0 条"
+    return "✅ 已重置今日实时盈亏\n" + "\n".join(results)
+
+
 with gr.Blocks(title="PC28量化智能挂机系统") as demo:
     gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
     gr.Markdown("已集成区间优化杀组预测算法（基于期号伪随机+区间缩放+序列规则回测选优）与同款报数播报功能。ABC杀球模式采用随机杀码、支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
+    with gr.Row():
+        reset_btn = gr.Button("🔄 重置今日实时盈亏", variant="primary")
+    reset_result = gr.Textbox(label="重置结果", interactive=False, lines=5)
+    reset_btn.click(fn=gradio_reset_daily_pnl, outputs=reset_result)
     gr.Markdown("---")
     gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
 
