@@ -364,7 +364,7 @@ class UserState:
         # ABC独立设置
         self.ball_bet_amount = 100.0
         self.abc_kill_count = 5           # 杀a球默认杀5码
-        self.abc_martingale_multiplier = 2.0  # ABC倍投倍数
+        self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 62.0]  # ABC自定义倍投阶梯
         self.abc_consecutive_losses = 0   # ABC连败次数
 
         # 上期ABC杀球记录 {b_char: [killed_digits]}
@@ -402,6 +402,13 @@ class UserState:
 
         self.load()
 
+    def get_abc_multiplier(self) -> float:
+        """根据当前连败次数获取ABC倍投倍数"""
+        if not self.abc_martingale_steps:
+            return 1.0
+        idx = min(self.abc_consecutive_losses, len(self.abc_martingale_steps) - 1)
+        return float(self.abc_martingale_steps[idx])
+
     def load(self):
         with self.lock:
             if os.path.exists(self.file_path):
@@ -422,7 +429,14 @@ class UserState:
                         self.selected_balls = data.get("selected_balls", ["a"])
                         self.ball_bet_amount = data.get("ball_bet_amount", 100.0)
                         self.abc_kill_count = data.get("abc_kill_count", 1)
-                        self.abc_martingale_multiplier = data.get("abc_martingale_multiplier", 2.0)
+                        # 兼容旧版：旧版使用 abc_martingale_multiplier 字段，新版使用 abc_martingale_steps 列表
+                        if "abc_martingale_steps" in data:
+                            self.abc_martingale_steps = data.get("abc_martingale_steps", [1.0, 3.0, 7.0, 15.0, 31.0, 62.0])
+                        elif "abc_martingale_multiplier" in data:
+                            old_mul = float(data.get("abc_martingale_multiplier", 2.0))
+                            self.abc_martingale_steps = [old_mul ** i for i in range(6)]
+                        else:
+                            self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 62.0]
                         self.abc_consecutive_losses = data.get("abc_consecutive_losses", 0)
                         self.last_ball_kills = data.get("last_ball_kills", {})
                         # 杀组
@@ -481,7 +495,7 @@ class UserState:
                         "selected_modes": self.selected_modes, "selected_balls": self.selected_balls,
                         "ball_bet_amount": self.ball_bet_amount,
                         "abc_kill_count": self.abc_kill_count,
-                        "abc_martingale_multiplier": self.abc_martingale_multiplier,
+                        "abc_martingale_steps": self.abc_martingale_steps,
                         "abc_consecutive_losses": self.abc_consecutive_losses,
                         "last_ball_kills": self.last_ball_kills,
                         "kill_enabled": self.kill_enabled,
@@ -673,12 +687,13 @@ class SystemOrchestrator:
         ]
 
     def amounts_menu_keyboard(self, u_state: UserState):
-        current_multiplier = u_state.abc_martingale_multiplier ** u_state.abc_consecutive_losses
+        current_multiplier = u_state.get_abc_multiplier()
+        steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u_state.abc_martingale_steps)
         triggered, reason = u_state.risk_mgr.check_triggered()
         risk_status = f"🔴 {reason}" if triggered else "🟢 正常"
         return [
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
-            [Button.inline(f"ABC倍投倍数: {u_state.abc_martingale_multiplier}x", data=b"set_abc_multiplier")],
+            [Button.inline(f"ABC倍投阶梯: {steps_str}", data=b"set_abc_steps")],
             [Button.inline(f"ABC杀码数量: {u_state.abc_kill_count}个", data=b"set_abc_kill_count")],
             [Button.inline(f"杀组单注金额: {u_state.kill_bet_amount}", data=b"set_kill_amount")],
             [Button.inline(f"杀组倍投倍数: {u_state.kill_martingale_multiplier}x", data=b"set_kill_multiplier")],
@@ -800,7 +815,7 @@ class SystemOrchestrator:
         abc_multiplier = 1.0
         abc_pred_info = {}
         if "ball" in u.selected_modes:
-            abc_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+            abc_multiplier = u.get_abc_multiplier()
             count = u.abc_kill_count
             try:
                 preds = abc_manager.get_all_predictions(
@@ -923,7 +938,8 @@ class SystemOrchestrator:
                 f"• 挂机状态: `{status_text}`\n"
                 f"• 绑定群组: `{len(u.groups)}` 个\n"
                 f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                f"• ABC倍投阶梯: `{','.join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)}`\n"
+                f"• ABC当前倍投: `{u.get_abc_multiplier()}x`\n"
                 f"• 区间杀组: `{kill_status}`\n"
                 f"• 报数播报: `{bc_status}`\n"
                 f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
@@ -1108,7 +1124,8 @@ class SystemOrchestrator:
                     f"• 挂机状态: `{status_text}`\n"
                     f"• 绑定群组: `{len(u.groups)}` 个\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• ABC倍投阶梯: `{','.join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)}`\n"
+                    f"• ABC当前倍投: `{u.get_abc_multiplier()}x`\n"
                     f"• 区间杀组: `{kill_status}`\n"
                     f"• 报数播报: `{bc_status}`\n"
                     f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
@@ -1161,9 +1178,14 @@ class SystemOrchestrator:
             elif data == "set_ball_amount":
                 self.user_login_states[sid] = "WAIT_BALL_AMOUNT"
                 await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`\n请输入新金额:")
-            elif data == "set_abc_multiplier":
-                self.user_login_states[sid] = "WAIT_ABC_MULTIPLIER"
-                await event.respond(f"当前ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n请输入新倍数(如 2.0 或 3.0):")
+            elif data == "set_abc_steps":
+                self.user_login_states[sid] = "WAIT_ABC_STEPS"
+                steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
+                await event.respond(
+                    f"当前ABC倍投阶梯: `{steps_str}`\n"
+                    f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`\n"
+                    f"请输入新的倍投阶梯（用英文逗号分隔，如 `1,3,7,15,31,62`）:"
+                )
             elif data == "set_abc_kill_count":
                 self.user_login_states[sid] = "WAIT_ABC_KILL_COUNT"
                 await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个\n请输入数量(1-9):")
@@ -1183,8 +1205,9 @@ class SystemOrchestrator:
                 )
             elif data == "stats":
                 rm = u.risk_mgr
-                current_multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+                current_multiplier = u.get_abc_multiplier()
                 kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
+                steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
                 can_bet, reason = rm.can_bet()
                 triggered, trigger_reason = rm.check_triggered()
                 await event.respond(
@@ -1192,7 +1215,7 @@ class SystemOrchestrator:
                     f"--------------------\n"
                     f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
                     f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投倍数: `{u.abc_martingale_multiplier}x`\n"
+                    f"• ABC倍投阶梯: `{steps_str}`\n"
                     f"• ABC当前连败: `{u.abc_consecutive_losses}` 次\n"
                     f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`\n"
                     f"• 杀组状态: `{'启用' if ('kill' in u.selected_modes and u.kill_enabled) else '未启用'}`\n"
@@ -1288,14 +1311,29 @@ class SystemOrchestrator:
                 except:
                     await event.respond("请输入有效数字")
                 self.user_login_states.pop(sid, None)
-            elif state == "WAIT_ABC_MULTIPLIER":
+            elif state == "WAIT_ABC_STEPS":
                 try:
-                    val = float(event.text.strip())
-                    u.abc_martingale_multiplier = max(1.0, val)
+                    txt = event.text.strip().replace("，", ",").replace(" ", "")
+                    parts = [p for p in txt.split(",") if p]
+                    if not parts:
+                        raise ValueError("空列表")
+                    steps = []
+                    for p in parts:
+                        v = float(p)
+                        if v < 0:
+                            raise ValueError("负数")
+                        steps.append(v)
+                    u.abc_martingale_steps = steps
                     u.save()
-                    await event.respond(f"ABC倍投倍数更新为: `{u.abc_martingale_multiplier}x`", buttons=self.main_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
+                    steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
+                    await event.respond(
+                        f"ABC倍投阶梯更新为: `{steps_str}`\n"
+                        f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`",
+                        buttons=self.main_keyboard(u)
+                    )
+                except Exception as e:
+                    logger.warning(f"用户 {sid} 设置ABC倍投阶梯失败: {e}")
+                    await event.respond("格式错误，请输入逗号分隔的正数，例如: `1,3,7,15,31,62`")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_ABC_KILL_COUNT":
                 try:
@@ -1414,7 +1452,7 @@ class SystemOrchestrator:
                                         if len(nums) > idx:
                                             has_any_bet = True
                                             actual_digit = nums[idx]
-                                            multiplier = u.abc_martingale_multiplier ** u.abc_consecutive_losses
+                                            multiplier = u.get_abc_multiplier()
                                             single_bet = u.ball_bet_amount * multiplier
                                             buy_count = 10 - u.abc_kill_count
                                             cost = buy_count * single_bet
