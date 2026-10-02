@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 本地运行产生的持久化数据
+telegram_sessions/
+user_data/
+*.session
+*.session-journal
+
+# 环境变量
+.env
+
+# IDE
+.vscode/
+.idea/
