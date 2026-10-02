@@ -276,7 +276,7 @@ class MarketData:
     combination: str
 
 class RiskManager:
-    def __init__(self, daily_stop_loss: float = 3000.0, daily_stop_profit: float = 5000.0):
+    def __init__(self, daily_stop_loss: float = 500.0, daily_stop_profit: float = 200.0):
         self.daily_stop_loss = daily_stop_loss
         self.daily_stop_profit = daily_stop_profit
         self.daily_pnl = 0.0
@@ -331,8 +331,8 @@ class RiskManager:
     @classmethod
     def from_dict(cls, data):
         rm = cls(
-            daily_stop_loss=data.get("daily_stop_loss", 3000.0),
-            daily_stop_profit=data.get("daily_stop_profit", 5000.0),
+            daily_stop_loss=data.get("daily_stop_loss", 500.0),
+            daily_stop_profit=data.get("daily_stop_profit", 200.0),
         )
         rm.last_pnl_reset_date = data.get("last_pnl_reset_date", None)
         rm.daily_pnl = data.get("daily_pnl", 0.0)
@@ -348,12 +348,12 @@ class UserState:
         self.is_logged_in = False
         self.is_active = False
         self.phone = ""
-        self.groups = []
+        self.groups = ["https://t.me/qwly21"]
         self.history = []
         self.risk_mgr = RiskManager()
         self.client = None
         self.temp_phone_code_hash = None
-        self.custom_delay = 12.0
+        self.custom_delay = 50.0
         self.custom_suffix = ""  
         self.last_betted_issue = ""
 
@@ -362,7 +362,7 @@ class UserState:
         self.selected_balls = ["a"] 
 
         # ABC独立设置
-        self.ball_bet_amount = 100.0
+        self.ball_bet_amount = 1.0
         self.abc_kill_count = 5           # 杀a球默认杀5码
         self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 62.0]  # ABC自定义倍投阶梯
         self.abc_consecutive_losses = 0   # ABC连败次数
@@ -419,7 +419,7 @@ class UserState:
                         self.is_active = data.get("is_active", False)
                         self.phone = data.get("phone", "")
                         self.groups = data.get("groups", [])
-                        self.custom_delay = data.get("custom_delay", 12.0)
+                        self.custom_delay = data.get("custom_delay", 50.0)
                         self.custom_suffix = data.get("custom_suffix", "")
                         # 兼容旧数据：过滤掉已删除的模式，支持 ball / kill
                         loaded_modes = data.get("selected_modes", ["ball"])
@@ -427,7 +427,7 @@ class UserState:
                         if not self.selected_modes:
                             self.selected_modes = ["ball"]
                         self.selected_balls = data.get("selected_balls", ["a"])
-                        self.ball_bet_amount = data.get("ball_bet_amount", 100.0)
+                        self.ball_bet_amount = data.get("ball_bet_amount", 1.0)
                         self.abc_kill_count = data.get("abc_kill_count", 1)
                         # 兼容旧版：旧版使用 abc_martingale_multiplier 字段，新版使用 abc_martingale_steps 列表
                         if "abc_martingale_steps" in data:
