@@ -806,4 +806,402 @@ class SystemOrchestrator:
                 if u.is_logged_in:
                     u.is_logged_in = u.is_active = False
                     if u.client:
-                        await u.client.disconn
+                        await u.client.disconnect()
+                    u.save()
+                    await event.edit("协议号已安全登出。", buttons=self.main_keyboard(u))
+                else:
+                    self.user_login_states[sid] = "WAIT_PHONE"
+                    await event.respond("请发送您的 Telegram 手机号:")
+            elif data == "add_g":
+                self.user_login_states[sid] = "WAIT_GROUP"
+                await event.respond("请发送目标群组的 Username 或 ID:")
+            elif data == "del_g":
+                if not u.groups:
+                    await event.respond("当前没有绑定任何群组。")
+                else:
+                    self.user_login_states[sid] = "WAIT_DEL_GROUP"
+                    await event.respond("发送对应的序号以移除群组:\n" + "\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]))
+            elif data == "list_g":
+                await event.respond("已绑定的目标群组列表:\n" + ("\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]) if u.groups else "无"))
+            elif data == "set_ball_amount":
+                self.user_login_states[sid] = "WAIT_BALL_AMOUNT"
+                await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`\n请输入新金额:")
+            elif data == "set_abc_steps":
+                self.user_login_states[sid] = "WAIT_ABC_STEPS"
+                steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
+                await event.respond(
+                    f"当前ABC倍投阶梯: `{steps_str}`\n"
+                    f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`\n"
+                    f"请输入新的倍投阶梯（用英文逗号分隔，如 `1,3,7,15,31,63`）:"
+                )
+            elif data == "set_stop_profit":
+                self.user_login_states[sid] = "WAIT_STOP_PROFIT"
+                await event.respond(f"当前每日止盈线: `{u.risk_mgr.daily_stop_profit}`\n请输入新金额(输入 0 为不限制):")
+            elif data == "set_stop_loss":
+                self.user_login_states[sid] = "WAIT_STOP_LOSS"
+                await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`\n请输入新金额(输入 0 为不限制):")
+            elif data == "reset_pnl":
+                old_pnl = u.reset_daily_pnl()
+                await event.respond(
+                    f"✅ 已重置今日实时盈亏\n"
+                    f"重置前: `{old_pnl:+.2f}`\n"
+                    f"重置后: `0.00`",
+                    buttons=self.main_keyboard(u)
+                )
+            elif data == "stats":
+                rm = u.risk_mgr
+                current_multiplier = u.get_abc_multiplier()
+                steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
+                can_bet, reason = rm.can_bet()
+                triggered, trigger_reason = rm.check_triggered()
+                await event.respond(
+                    f"详细收益战报与风控统计\n"
+                    f"--------------------\n"
+                    f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
+                    f"• 选球位次: {','.join([b.upper() for b in u.selected_balls])}\n"
+                    f"• A球杀码: `随机杀5码`\n"
+                    f"• C球杀码: `预测杀1码`\n"
+                    f"• ABC倍投阶梯: `{steps_str}`\n"
+                    f"• ABC当前连败: `{u.abc_consecutive_losses}` 次\n"
+                    f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`\n"
+                    f"• 报数播报: `{'开启' if u.broadcast_enabled else '关闭'}` (`{u.broadcast_count}` 期)\n"
+                    f"• 每日止盈线: `{rm.daily_stop_profit}`\n"
+                    f"• 每日止损线: `{rm.daily_stop_loss}`\n"
+                    f"• 风控状态: `{'🔴 已触发: ' + trigger_reason if triggered else '🟢 正常'}`\n"
+                    f"--------------------"
+                )
+
+        @self.bot.on(events.NewMessage)
+        async def handler_text(event):
+            if event.text.startswith("/"):
+                return
+            sid = event.sender_id
+            state = self.user_login_states.get(sid)
+            u = self.get_user_state(sid)
+
+            if state == "WAIT_PHONE":
+                u.phone = event.text.strip()
+                try:
+                    client = TelegramClient(os.path.join(SESSIONS_DIR, f"user_{sid}"), API_ID, API_HASH)
+                    await client.connect()
+                    req = await client.send_code_request(u.phone)
+                    u.client, u.temp_phone_code_hash = client, req.phone_code_hash
+                    self.user_login_states[sid] = "WAIT_CODE"
+                    await event.respond("验证码已发送到您的 Telegram，请在 1 分钟内输入:")
+                except Exception as e:
+                    await event.respond(f"发送验证码失败: {e}")
+                    self.user_login_states.pop(sid, None)
+            elif state == "WAIT_CODE":
+                code_text = event.text.strip()
+                try:
+                    await u.client.sign_in(u.phone, code_text, phone_code_hash=u.temp_phone_code_hash)
+                    u.is_logged_in = True
+                    u.save()
+                    self.user_login_states.pop(sid, None)
+                    await event.respond("协议号登录成功!", buttons=self.main_keyboard(u))
+                except SessionPasswordNeededError:
+                    self.user_login_states[sid] = "WAIT_2FA"
+                    await event.respond("检测到账户开启了两步验证 (2FA)，请输入密码:")
+                except (PhoneCodeExpiredError, PhoneCodeInvalidError) as pce:
+                    await event.respond(f"验证码已失效或错误: {pce}")
+                    self.user_login_states.pop(sid, None)
+                except Exception as e:
+                    await event.respond(f"登录失败: {e}")
+                    self.user_login_states.pop(sid, None)
+            elif state == "WAIT_2FA":
+                try:
+                    await u.client.sign_in(password=event.text.strip())
+                    u.is_logged_in = True
+                    u.save()
+                    self.user_login_states.pop(sid, None)
+                    await event.respond("2FA 验证通过，登录成功!", buttons=self.main_keyboard(u))
+                except Exception as e:
+                    await event.respond(f"密码错误: {e}")
+            elif state == "WAIT_GROUP":
+                grp = event.text.strip()
+                if grp not in u.groups:
+                    u.groups.append(grp)
+                    u.save()
+                await event.respond(f"成功绑定群组: `{grp}`", buttons=self.main_keyboard(u))
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_DEL_GROUP":
+                val = event.text.strip()
+                if val.isdigit() and 0 <= int(val) - 1 < len(u.groups):
+                    rmv = u.groups.pop(int(val) - 1)
+                    u.save()
+                    await event.respond(f"已成功移除群组: `{rmv}`", buttons=self.main_keyboard(u))
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_DELAY":
+                try:
+                    u.custom_delay = max(0.0, float(event.text.strip()))
+                    u.save()
+                    await event.respond(f"投递延迟更新为: `{u.custom_delay}s`", buttons=self.main_keyboard(u))
+                except:
+                    await event.respond("请输入有效的秒数数字")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_SUFFIX":
+                txt = event.text.strip()
+                u.custom_suffix = "" if txt.lower() == "clear" else txt
+                u.save()
+                await event.respond("独立尾缀已更新", buttons=self.main_keyboard(u))
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_BALL_AMOUNT":
+                try:
+                    u.ball_bet_amount = max(1.0, float(event.text.strip()))
+                    u.save()
+                    await event.respond("ABC杀球单注金额更新成功", buttons=self.main_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_ABC_STEPS":
+                try:
+                    txt = event.text.strip().replace("，", ",").replace(" ", "")
+                    parts = [p for p in txt.split(",") if p]
+                    if not parts:
+                        raise ValueError("空列表")
+                    steps = []
+                    for p in parts:
+                        v = float(p)
+                        if v < 0:
+                            raise ValueError("负数")
+                        steps.append(v)
+                    u.abc_martingale_steps = steps
+                    u.save()
+                    steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
+                    await event.respond(
+                        f"ABC倍投阶梯更新为: `{steps_str}`\n"
+                        f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`",
+                        buttons=self.main_keyboard(u)
+                    )
+                except Exception as e:
+                    logger.warning(f"用户 {sid} 设置ABC倍投阶梯失败: {e}")
+                    await event.respond("格式错误，请输入逗号分隔的正数，例如: `1,3,7,15,31,63`")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_STOP_PROFIT":
+                try:
+                    val = float(event.text.strip())
+                    u.risk_mgr.daily_stop_profit = max(0.0, val)
+                    u.save()
+                    await event.respond(f"每日止盈线更新为: `{u.risk_mgr.daily_stop_profit}`", buttons=self.main_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_STOP_LOSS":
+                try:
+                    val = float(event.text.strip())
+                    u.risk_mgr.daily_stop_loss = max(0.0, val)
+                    u.save()
+                    await event.respond(f"每日止损线更新为: `{u.risk_mgr.daily_stop_loss}`", buttons=self.main_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
+                self.user_login_states.pop(sid, None)
+            elif state == "WAIT_EXTRA_AMOUNTS":
+                try:
+                    parts = event.text.strip().replace("，", ",").split(",")
+                    amts = [float(p.strip()) for p in parts if p.strip()]
+                    keys = ["0", "27", "1", "26", "baozi"]
+                    if len(amts) == 1:
+                        for k in keys:
+                            u.extra_bet_amounts[k] = amts[0]
+                    elif len(amts) == 2:
+                        for k in keys:
+                            u.extra_bet_amounts[k] = amts[1] if k == "baozi" else amts[0]
+                    elif len(amts) >= 5:
+                        for i, k in enumerate(keys):
+                            u.extra_bet_amounts[k] = amts[i]
+                    else:
+                        # 3 或 4 个金额时按顺序填充，其余保持不变
+                        for i, k in enumerate(keys):
+                            if i < len(amts):
+                                u.extra_bet_amounts[k] = amts[i]
+                    u.save()
+                    self.user_login_states.pop(sid, None)
+                    await event.respond("特码与豹子独立金额更新成功", buttons=self.extra_config_keyboard(u))
+                except:
+                    await event.respond("格式错误，请重新输入，例如: `100,100,100,100,200`")
+            elif state == "WAIT_BROADCAST_CHANNEL":
+                u.broadcast_channel = event.text.strip()
+                u.save()
+                self.user_login_states.pop(sid, None)
+                await event.respond(f"播报频道更新为: `{u.broadcast_channel}`", buttons=self.broadcast_settings_keyboard(u))
+            elif state == "WAIT_BROADCAST_TITLE":
+                u.broadcast_title = event.text.strip() or "预测播报"
+                u.save()
+                self.user_login_states.pop(sid, None)
+                await event.respond(f"播报标题更新为: `{u.broadcast_title}`", buttons=self.broadcast_settings_keyboard(u))
+            elif state == "WAIT_BROADCAST_MAX":
+                try:
+                    u.broadcast_max_periods = max(0, int(event.text.strip()))
+                    u.save()
+                    self.user_login_states.pop(sid, None)
+                    await event.respond(f"最大播报期数更新为: `{'∞' if u.broadcast_max_periods <= 0 else u.broadcast_max_periods}`", buttons=self.broadcast_settings_keyboard(u))
+                except:
+                    await event.respond("请输入非负整数")
+                    self.user_login_states.pop(sid, None)
+
+    async def poll_api(self):
+        """24小时全自动轮询与结算守护"""
+        logger.info("24小时永动API轮询与结算守护已启动...")
+        while True:
+            try:
+                data = await DataFetcher.fetch_latest()
+                if data and data.issue_id != self.last_issue_id:
+                    self.last_issue_id = data.issue_id
+                    for uid, u in self.users.items():
+                        if u.is_logged_in:
+                            # 初始化本期盈亏
+                            total_abc_pnl = 0.0
+
+                            # ABC球模式结算逻辑（中奖倍率 9.99，按整体盈亏判定输赢）
+                            if "ball" in u.selected_modes and u.last_ball_kills:
+                                nums = [int(d) for d in data.number_str if d.isdigit()]
+                                ball_index_map = {"a": 0, "c": 2}
+                                has_any_bet = False
+
+                                for b_char in u.selected_balls:
+                                    if b_char in u.last_ball_kills and b_char in ball_index_map:
+                                        killed_list = u.last_ball_kills[b_char]
+                                        idx = ball_index_map[b_char]
+                                        if len(nums) > idx:
+                                            has_any_bet = True
+                                            actual_digit = nums[idx]
+                                            multiplier = u.get_abc_multiplier()
+                                            single_bet = u.ball_bet_amount * multiplier
+                                            buy_count = 10 - len(killed_list)
+                                            cost = buy_count * single_bet
+
+                                            if actual_digit not in killed_list:
+                                                win_amount = single_bet * 9.99
+                                                total_abc_pnl += (win_amount - cost)
+                                                logger.info(f"[用户 {uid}] ABC球 {b_char.upper()}球 中奖: 开奖{actual_digit} 不在杀码{killed_list}, 返还{win_amount:.2f}, 成本{cost:.2f}")
+                                            else:
+                                                total_abc_pnl -= cost
+                                                logger.info(f"[用户 {uid}] ABC球 {b_char.upper()}球 未中: 开奖{actual_digit} 在杀码{killed_list}, 亏损{cost:.2f}")
+
+                                if has_any_bet:
+                                    if total_abc_pnl != 0:
+                                        u.risk_mgr.add_pnl(total_abc_pnl)
+                                    if total_abc_pnl > 0:
+                                        u.abc_consecutive_losses = 0
+                                        logger.info(f"[用户 {uid}] ABC球本期整体盈利 {total_abc_pnl:.2f}，倍投重置归零")
+                                    else:
+                                        u.abc_consecutive_losses += 1
+                                        logger.info(f"[用户 {uid}] ABC球本期整体亏损 {total_abc_pnl:.2f}，连败+1: {u.abc_consecutive_losses}")
+
+                                u.last_ball_kills = {}
+
+                            u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
+                            if len(u.history) > 120:
+                                u.history = u.history[:120]
+                            u.save()
+
+                            # 报数播报
+                            await self.do_broadcast(u, data)
+
+                            # 结算后检查是否触发止盈/止损，触发则自动暂停挂机
+                            triggered, trigger_reason = u.risk_mgr.check_triggered()
+                            if triggered and u.is_active:
+                                u.is_active = False
+                                u.save()
+                                logger.warning(f"[用户 {uid}] 触发风控自动暂停: {trigger_reason}, 盈亏={u.risk_mgr.daily_pnl:+.2f}")
+                                try:
+                                    await self.bot.send_message(
+                                        u.user_id,
+                                        f"【🚨 风控自动暂停通知】\n"
+                                        f"--------------------\n"
+                                        f"期号: `{data.issue_id}`\n"
+                                        f"触发原因: `{trigger_reason}`\n"
+                                        f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                                        f"--------------------\n"
+                                        f"挂机已自动暂停，如需继续请手动点击 🚀 启动挂机"
+                                    )
+                                except:
+                                    pass
+
+                            try:
+                                await self.bot.send_message(
+                                    u.user_id,
+                                    f"【开奖结果通知】\n"
+                                    f"--------------------\n"
+                                    f"期号: `{data.issue_id}`\n"
+                                    f"开奖: `{data.number_str}` (和值: `{data.num_value}` -> `{data.combination}`)\n"
+                                    f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
+                                    f"--------------------"
+                                )
+                            except:
+                                pass
+
+                            if u.is_active:
+                                next_issue = get_next_qihao(data.issue_id)
+                                asyncio.create_task(self.handle_new_issue_bet(u, next_issue, data))
+            except Exception as e:
+                logger.error(f"轮询守护异常自动隔离: {e}")
+
+            await asyncio.sleep(4)
+
+    async def start(self):
+        if self.bot is None:
+            logger.warning("Bot 未初始化，跳过 Telegram 启动，仅保留 Gradio 控制台")
+            return
+        await self.bot.start(bot_token=BOT_TOKEN)
+        await self.register_handlers()
+        await self.load_existing_users()
+        logger.info("PC28量化挂机中控系统已上线!")
+        asyncio.create_task(self.poll_api())
+        await self.bot.run_until_disconnected()
+
+# ==================== 6. Gradio 后台控制台 ====================
+# 全局引用，让 Gradio 控件可以操作后台 orchestrator
+_orchestrator: Optional[SystemOrchestrator] = None
+
+
+def start_bot_thread():
+    global _orchestrator
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    orchestrator = SystemOrchestrator()
+    _orchestrator = orchestrator
+    try:
+        loop.run_until_complete(orchestrator.start())
+    except Exception as e:
+        logger.error(f"Bot 运行异常: {e}")
+
+
+def gradio_reset_daily_pnl():
+    """Gradio 按钮回调：清空所有用户的今日实时盈亏"""
+    if _orchestrator is None:
+        return "系统尚未启动，无法重置"
+    results = []
+    for uid, u in list(_orchestrator.users.items()):
+        old = u.reset_daily_pnl()
+        results.append(f"用户 {uid}: {old:+.2f} -> 0.00")
+    if not results:
+        return "当前没有用户数据，已清空 0 条"
+    return "✅ 已重置今日实时盈亏\n" + "\n".join(results)
+
+
+with gr.Blocks(title="PC28量化智能挂机系统") as demo:
+    gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
+    gr.Markdown("已集成同款报数播报功能。ABC杀球模式：A球固定随机杀5码，C球基于上一期开奖号码通过公式 `abc×π×e/(a+b+c)` 预测杀1码，自动投递剩余数字。支持ABC倍投阶梯与连败累计（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
+    with gr.Row():
+        reset_btn = gr.Button("🔄 重置今日实时盈亏", variant="primary")
+    reset_result = gr.Textbox(label="重置结果", interactive=False, lines=5)
+    reset_btn.click(fn=gradio_reset_daily_pnl, outputs=reset_result)
+    gr.Markdown("---")
+    gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
+
+# 用 FastAPI 包装 Gradio，提供 /health 端点供 Railway 等平台做健康检查
+fastapi_app = FastAPI(title="PC28量化智能挂机系统")
+
+@fastapi_app.get("/health")
+def health_check():
+    return {"status": "healthy", "algorithms": 1}
+
+fastapi_app = mount_gradio_app(fastapi_app, demo, path="/")
+
+if __name__ == "__main__":
+    # 仅在直接运行时才启动 Telegram Bot 线程，避免部署平台导入模块时触发
+    threading.Thread(target=start_bot_thread, daemon=True).start()
+    port = int(os.getenv("PORT", "7860"))
+    logger.info(f"启动 Gradio/FastAPI 服务，监听 0.0.0.0:{port}")
+    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="warning")
