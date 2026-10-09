@@ -364,7 +364,7 @@ class UserState:
         # ABC独立设置
         self.ball_bet_amount = 1.0
         self.abc_kill_count = 5           # 杀a球默认杀5码
-        self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 62.0]  # ABC自定义倍投阶梯
+        self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 63.0]  # ABC自定义倍投阶梯
         self.abc_consecutive_losses = 0   # ABC连败次数
 
         # 上期ABC杀球记录 {b_char: [killed_digits]}
@@ -372,12 +372,15 @@ class UserState:
 
         # 杀组设置（基于30算法集成投票）
         self.kill_enabled = False
-        self.kill_bet_amount = 100.0
-        self.kill_martingale_multiplier = 2.0
+        self.kill_martingale_multiplier = 2.5
         self.kill_consecutive_losses = 0
         self.kill_history = []            # 最近3期杀组记录，避免连杀同一组合
         self.last_killed_group = ""       # 上期实际杀的组合
         self.kill_last_settled_issue = "" # 上期已结算期号
+
+        # 杀组动态比例设置
+        self.kill_initial_balance = 0.0   # 初始账户余额
+        self.kill_dynamic_ratio = 0.0     # 动态比例（0 表示禁用，如 0.01 表示 1%）
 
         # 附加下注特码与豹子配置（特码 0/27/1/26 各自独立）
         self.extra_special_numbers = []  # 例: ["0", "27", "1", "26"]
@@ -441,12 +444,13 @@ class UserState:
                         self.last_ball_kills = data.get("last_ball_kills", {})
                         # 杀组
                         self.kill_enabled = data.get("kill_enabled", False)
-                        self.kill_bet_amount = data.get("kill_bet_amount", 100.0)
                         self.kill_martingale_multiplier = data.get("kill_martingale_multiplier", 2.0)
                         self.kill_consecutive_losses = data.get("kill_consecutive_losses", 0)
                         self.kill_history = data.get("kill_history", [])
                         self.last_killed_group = data.get("last_killed_group", "")
                         self.kill_last_settled_issue = data.get("kill_last_settled_issue", "")
+                        self.kill_initial_balance = data.get("kill_initial_balance", 0.0)
+                        self.kill_dynamic_ratio = data.get("kill_dynamic_ratio", 0.0)
                         # 报数
                         self.broadcast_enabled = data.get("broadcast_enabled", False)
                         self.broadcast_channel = data.get("broadcast_channel", "")
@@ -499,12 +503,13 @@ class UserState:
                         "abc_consecutive_losses": self.abc_consecutive_losses,
                         "last_ball_kills": self.last_ball_kills,
                         "kill_enabled": self.kill_enabled,
-                        "kill_bet_amount": self.kill_bet_amount,
                         "kill_martingale_multiplier": self.kill_martingale_multiplier,
                         "kill_consecutive_losses": self.kill_consecutive_losses,
                         "kill_history": self.kill_history,
                         "last_killed_group": self.last_killed_group,
                         "kill_last_settled_issue": self.kill_last_settled_issue,
+                        "kill_initial_balance": self.kill_initial_balance,
+                        "kill_dynamic_ratio": self.kill_dynamic_ratio,
                         "broadcast_enabled": self.broadcast_enabled,
                         "broadcast_channel": self.broadcast_channel,
                         "broadcast_title": self.broadcast_title,
@@ -644,7 +649,7 @@ class SystemOrchestrator:
             [Button.inline(f"状态: {status}", data=b"noop"), Button.inline(login, data=b"login")],
             [Button.inline("🚀 启动挂机", data=b"start"), Button.inline("⏹ 暂停挂机", data=b"stop")],
             [Button.inline("⚙️ 模式选择", data=b"select_mode")],
-            [Button.inline("🎯 杀组设置", data=b"kill_settings"), Button.inline("📢 报数设置", data=b"broadcast_settings")],
+            [Button.inline("📢 报数设置", data=b"broadcast_settings")],
             [Button.inline("💎 附加特码/豹子配置", data=b"extra_config")],
             [Button.inline("💰 独立金额与风控设置", data=b"set_amounts_menu")],
             [Button.inline("➕ 绑定群组", data=b"add_g"), Button.inline("➖ 移除群组", data=b"del_g"), Button.inline("📋 群组列表", data=b"list_g")],
@@ -695,22 +700,13 @@ class SystemOrchestrator:
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
             [Button.inline(f"ABC倍投阶梯: {steps_str}", data=b"set_abc_steps")],
             [Button.inline(f"ABC杀码数量: {u_state.abc_kill_count}个", data=b"set_abc_kill_count")],
-            [Button.inline(f"杀组单注金额: {u_state.kill_bet_amount}", data=b"set_kill_amount")],
             [Button.inline(f"杀组倍投倍数: {u_state.kill_martingale_multiplier}x", data=b"set_kill_multiplier")],
+            [Button.inline(f"杀组初始余额: {u_state.kill_initial_balance}", data=b"set_kill_initial_balance")],
+            [Button.inline(f"杀组动态比例: {u_state.kill_dynamic_ratio}", data=b"set_kill_dynamic_ratio")],
             [Button.inline(f"每日止盈线: {u_state.risk_mgr.daily_stop_profit}", data=b"set_stop_profit")],
             [Button.inline(f"每日止损线: {u_state.risk_mgr.daily_stop_loss}", data=b"set_stop_loss")],
             [Button.inline(f"风控状态: {risk_status}", data=b"noop")],
             [Button.inline("特码与豹子独立金额设置", data=b"set_extra_amounts")],
-            [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
-        ]
-
-    def kill_settings_keyboard(self, u_state: UserState):
-        enabled = "✅ " if u_state.kill_enabled else "⬜ "
-        return [
-            [Button.inline(f"{enabled}启用杀组下注", data=b"toggle_kill_enabled")],
-            [Button.inline(f"杀组单注金额: {u_state.kill_bet_amount}", data=b"set_kill_amount")],
-            [Button.inline(f"杀组倍投倍数: {u_state.kill_martingale_multiplier}x", data=b"set_kill_multiplier")],
-            [Button.inline(f"当前杀组连败: {u_state.kill_consecutive_losses}", data=b"noop")],
             [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
 
@@ -862,10 +858,17 @@ class SystemOrchestrator:
                         all_bet_lines.append(f"{b_char}{d}/{int(single_bet)}")
 
         if "kill" in u.selected_modes and u.kill_enabled and kill_target_for_bet:
-            single_bet = u.kill_bet_amount * kill_multiplier
-            bet_combos = [c for c in COMBOS if c != kill_target_for_bet]
-            for c in bet_combos:
-                all_bet_lines.append(f"{c}/{int(single_bet)}")
+            # 杀组金额完全由动态比例决定：根据初始余额 + 今日实时盈亏计算
+            if u.kill_dynamic_ratio <= 0:
+                logger.info(f"[用户 {u.user_id}] 杀组动态比例未设置，跳过杀组下注")
+            else:
+                current_balance = u.kill_initial_balance + u.risk_mgr.daily_pnl
+                base_bet = max(1.0, current_balance * u.kill_dynamic_ratio) * kill_multiplier
+                bet_combos = [c for c in COMBOS if c != kill_target_for_bet]
+                for c in bet_combos:
+                    combo_bet = base_bet * 1.165 if c in ("大双", "小单") else base_bet
+                    bet_str = f"{combo_bet:.1f}" if combo_bet != int(combo_bet) else f"{int(combo_bet)}"
+                    all_bet_lines.append(f"{c}/{bet_str}")
 
         # 附加特码与豹子下注（特码各自独立）
         for num in ["0", "27", "1", "26"]:
@@ -974,8 +977,10 @@ class SystemOrchestrator:
             if data == "toggle_mode_kill":
                 if "kill" in u.selected_modes:
                     u.selected_modes.remove("kill")
+                    u.kill_enabled = False
                 else:
                     u.selected_modes.append("kill")
+                    u.kill_enabled = True
                 u.save()
                 await event.edit("请选择要启用的模式", buttons=self.mode_selection_keyboard(u))
                 return
@@ -1066,24 +1071,22 @@ class SystemOrchestrator:
                 )
                 return
 
-            if data == "kill_settings":
-                await event.edit("区间杀组模式设置", buttons=self.kill_settings_keyboard(u))
-                return
-
-            if data == "toggle_kill_enabled":
-                u.kill_enabled = not u.kill_enabled
-                u.save()
-                await event.edit("区间杀组模式设置", buttons=self.kill_settings_keyboard(u))
-                return
-
-            if data == "set_kill_amount":
-                self.user_login_states[sid] = "WAIT_KILL_AMOUNT"
-                await event.respond(f"当前杀组单注金额: `{u.kill_bet_amount}`\n请输入新金额:")
-                return
-
             if data == "set_kill_multiplier":
                 self.user_login_states[sid] = "WAIT_KILL_MULTIPLIER"
                 await event.respond(f"当前杀组倍投倍数: `{u.kill_martingale_multiplier}x`\n请输入新倍数(如 2.0 或 3.0):")
+                return
+
+            if data == "set_kill_initial_balance":
+                self.user_login_states[sid] = "WAIT_KILL_INITIAL_BALANCE"
+                await event.respond(f"当前杀组初始余额: `{u.kill_initial_balance}`\n请输入新的初始账户余额:")
+                return
+
+            if data == "set_kill_dynamic_ratio":
+                self.user_login_states[sid] = "WAIT_KILL_DYNAMIC_RATIO"
+                await event.respond(
+                    f"当前杀组动态比例: `{u.kill_dynamic_ratio}`\n"
+                    f"请输入比例(如 `0.01` 表示余额的 1%，输入 `0` 表示禁用动态比例，使用固定杀组单注金额):"
+                )
                 return
 
             if data == "broadcast_settings":
@@ -1184,7 +1187,7 @@ class SystemOrchestrator:
                 await event.respond(
                     f"当前ABC倍投阶梯: `{steps_str}`\n"
                     f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`\n"
-                    f"请输入新的倍投阶梯（用英文逗号分隔，如 `1,3,7,15,31,62`）:"
+                    f"请输入新的倍投阶梯（用英文逗号分隔，如 `1,3,7,15,31,63`）:"
                 )
             elif data == "set_abc_kill_count":
                 self.user_login_states[sid] = "WAIT_ABC_KILL_COUNT"
@@ -1210,6 +1213,13 @@ class SystemOrchestrator:
                 steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
                 can_bet, reason = rm.can_bet()
                 triggered, trigger_reason = rm.check_triggered()
+                kill_current_balance = u.kill_initial_balance + rm.daily_pnl
+                if u.kill_dynamic_ratio > 0:
+                    kill_calc_base = max(1.0, kill_current_balance * u.kill_dynamic_ratio) * kill_multiplier
+                    kill_dynamic_status = f"动态({u.kill_dynamic_ratio})"
+                else:
+                    kill_calc_base = 0.0
+                    kill_dynamic_status = "未设置"
                 await event.respond(
                     f"详细收益战报与风控统计\n"
                     f"--------------------\n"
@@ -1221,7 +1231,10 @@ class SystemOrchestrator:
                     f"• 杀组状态: `{'启用' if ('kill' in u.selected_modes and u.kill_enabled) else '未启用'}`\n"
                     f"• 杀组倍投倍数: `{u.kill_martingale_multiplier}x`\n"
                     f"• 杀组当前连败: `{u.kill_consecutive_losses}` 次\n"
-                    f"• 杀组当前计算单注: `{u.kill_bet_amount * kill_multiplier:.2f}`\n"
+                    f"• 杀组初始余额: `{u.kill_initial_balance:.2f}`\n"
+                    f"• 杀组当前余额: `{kill_current_balance:.2f}`\n"
+                    f"• 杀组动态比例: `{kill_dynamic_status}`\n"
+                    f"• 杀组当前计算单注: `{kill_calc_base:.2f}`\n"
                     f"• 报数播报: `{'开启' if u.broadcast_enabled else '关闭'}` (`{u.broadcast_count}` 期)\n"
                     f"• 每日止盈线: `{rm.daily_stop_profit}`\n"
                     f"• 每日止损线: `{rm.daily_stop_loss}`\n"
@@ -1333,7 +1346,7 @@ class SystemOrchestrator:
                     )
                 except Exception as e:
                     logger.warning(f"用户 {sid} 设置ABC倍投阶梯失败: {e}")
-                    await event.respond("格式错误，请输入逗号分隔的正数，例如: `1,3,7,15,31,62`")
+                    await event.respond("格式错误，请输入逗号分隔的正数，例如: `1,3,7,15,31,63`")
                 self.user_login_states.pop(sid, None)
             elif state == "WAIT_ABC_KILL_COUNT":
                 try:
@@ -1386,22 +1399,32 @@ class SystemOrchestrator:
                     await event.respond("特码与豹子独立金额更新成功", buttons=self.extra_config_keyboard(u))
                 except:
                     await event.respond("格式错误，请重新输入，例如: `100,100,100,100,200`")
-            elif state == "WAIT_KILL_AMOUNT":
-                try:
-                    u.kill_bet_amount = max(1.0, float(event.text.strip()))
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond(f"杀组单注金额更新为: `{u.kill_bet_amount}`", buttons=self.kill_settings_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                    self.user_login_states.pop(sid, None)
             elif state == "WAIT_KILL_MULTIPLIER":
                 try:
                     val = float(event.text.strip())
                     u.kill_martingale_multiplier = max(1.0, val)
                     u.save()
                     self.user_login_states.pop(sid, None)
-                    await event.respond(f"杀组倍投倍数更新为: `{u.kill_martingale_multiplier}x`", buttons=self.kill_settings_keyboard(u))
+                    await event.respond(f"杀组倍投倍数更新为: `{u.kill_martingale_multiplier}x`", buttons=self.amounts_menu_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
+                    self.user_login_states.pop(sid, None)
+            elif state == "WAIT_KILL_INITIAL_BALANCE":
+                try:
+                    u.kill_initial_balance = max(0.0, float(event.text.strip()))
+                    u.save()
+                    self.user_login_states.pop(sid, None)
+                    await event.respond(f"杀组初始余额更新为: `{u.kill_initial_balance}`", buttons=self.amounts_menu_keyboard(u))
+                except:
+                    await event.respond("请输入有效数字")
+                    self.user_login_states.pop(sid, None)
+            elif state == "WAIT_KILL_DYNAMIC_RATIO":
+                try:
+                    val = float(event.text.strip())
+                    u.kill_dynamic_ratio = max(0.0, min(1.0, val))
+                    u.save()
+                    self.user_login_states.pop(sid, None)
+                    await event.respond(f"杀组动态比例更新为: `{u.kill_dynamic_ratio}`", buttons=self.amounts_menu_keyboard(u))
                 except:
                     await event.respond("请输入有效数字")
                     self.user_login_states.pop(sid, None)
@@ -1482,15 +1505,23 @@ class SystemOrchestrator:
 
                                 u.last_ball_kills = {}
 
-                            # 区间杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32）
+                            # 区间杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32；大双/小单投注金额为基础金额*1.165）
                             if "kill" in u.selected_modes and u.kill_enabled and u.last_killed_group:
                                 if u.kill_last_settled_issue != data.issue_id:
                                     u.kill_last_settled_issue = data.issue_id
                                     actual_combo = data.combination
                                     last_kill = u.last_killed_group
                                     multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                                    single_bet = u.kill_bet_amount * multiplier
-                                    cost = 3 * single_bet  # 买3个组合
+                                    # 杀组金额完全由动态比例决定：根据初始余额 + 今日实时盈亏计算
+                                    if u.kill_dynamic_ratio <= 0:
+                                        logger.info(f"[用户 {uid}] 杀组动态比例未设置，跳过杀组结算")
+                                        continue
+                                    current_balance = u.kill_initial_balance + u.risk_mgr.daily_pnl
+                                    base_bet = max(1.0, current_balance * u.kill_dynamic_ratio) * multiplier
+                                    bet_combos = [c for c in COMBOS if c != last_kill]
+                                    def _kill_bet_amount(c):
+                                        return base_bet * 1.165 if c in ("大双", "小单") else base_bet
+                                    cost = sum(_kill_bet_amount(c) for c in bet_combos)
 
                                     if actual_combo == last_kill:
                                         # 杀中，亏损全部本金
@@ -1503,7 +1534,7 @@ class SystemOrchestrator:
                                             odds = 3.71
                                         else:
                                             odds = 4.32
-                                        win_amount = single_bet * odds
+                                        win_amount = _kill_bet_amount(actual_combo) * odds
                                         kill_pnl = win_amount - cost
                                         u.kill_consecutive_losses = 0
                                         logger.info(f"[用户 {uid}] 杀组未中: 杀{last_kill}=开{actual_combo}(赔率{odds}), 盈利{kill_pnl:.2f}, 连败清零")
