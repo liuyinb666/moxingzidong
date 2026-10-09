@@ -27,39 +27,37 @@ def get_type(s: int) -> str:
 
 
 def compute_sha_a_kills(nums: list, total: int) -> list:
-    """
-    杀a球规则：根据最新一期开奖号码生成下一期 5 个杀号数字。
-    计算方式：total / abc * e，取小数部分，从小数点后第 2 位开始提取不重复数字，直到 5 个。
-    """
-    if len(nums) < 3:
-        return random.sample(range(10), 5)
-    abc = nums[0] * 100 + nums[1] * 10 + nums[2]
-    if abc == 0:
-        abc = 1
-    value = (total / abc) * math.e
-    frac = value - int(value)
-    # 保留足够多的小数位
-    frac_str = f"{frac:.20f}".replace("0.", "")
-    kills = []
-    # 从小数点后第 2 位开始（索引 1）
-    for ch in frac_str[1:]:
-        d = int(ch)
-        if d not in kills:
-            kills.append(d)
-        if len(kills) >= 5:
-            break
-    if len(kills) < 5:
-        # 兜底：补足不重复数字
-        for d in range(10):
-            if d not in kills:
-                kills.append(d)
-            if len(kills) >= 5:
-                break
-    return kills
+    """A球杀号：固定随机杀5码"""
+    return random.sample(range(10), 5)
 
 
-# 杀组四组合
-COMBOS = ["大单", "小单", "大双", "小双"]
+def predict_c_kill(a: int, b: int, c: int) -> Optional[int]:
+    """
+    C球杀号预测：将a、b、c球拼接成三位数abc,
+    计算 abc * π * e / (a+b+c)，取结果的最后一位数字。
+    """
+    s = a + b + c
+    if s == 0:
+        return None
+    abc = int(f"{a}{b}{c}")
+    result = abc * math.pi * math.e / s
+    digits = f"{result:.10f}".replace(".", "").rstrip("0")
+    return int(digits[-1])
+
+
+def get_a_kills() -> list:
+    return random.sample(range(10), 5)
+
+
+def get_c_kills(history: list) -> list:
+    if history:
+        nums = history[0].get("nums", [])
+        if len(nums) >= 3:
+            predicted = predict_c_kill(nums[0], nums[1], nums[2])
+            if predicted is not None:
+                return [predicted]
+    return random.sample(range(10), 1)
+
 
 # ==================== 2. 风控管理系统 ====================
 API_ID = int(os.getenv("API_ID", "0"))
@@ -79,193 +77,6 @@ os.makedirs(USER_DATA_DIR, exist_ok=True)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - [%(levelname)s] - %(message)s")
 logger = logging.getLogger(__name__)
-
-# ==================== 算法基类与 6 个内置算法 ====================
-
-class BasePredictor:
-    """所有预测算法的基类"""
-    name = "base"
-    version = "1.0"
-
-    def predict(self, history: list) -> dict:
-        raise NotImplementedError
-
-    def update(self, actual: dict):
-        pass
-
-    def _base_scores(self, value=50):
-        return {"大单": value, "大双": value, "小单": value, "小双": value}
-
-    def _combo(self, size, odd):
-        return f"{size}{odd}"
-
-
-ALL_TYPES = ['小双', '小单', '大双', '大单']
-SEQUENCES = [
-    [0, 3, 9, 12, 15, 18, 21, 24, 27],
-    [1, 4, 7, 10, 13, 16, 19, 22, 25],
-    [2, 5, 8, 11, 14, 17, 20, 23, 26]
-]
-COMBINATION_RULES = {
-    'sameSequence': {
-        '小双': ['小双', '大双', '大单'],
-        '小单': ['小单', '大单', '大双'],
-        '大双': ['大双', '小双', '小单'],
-        '大单': ['大单', '小单', '小双']
-    },
-    'diffSequence': {
-        '小双': ['小双', '小单', '大单'],
-        '小单': ['小单', '小双', '大双'],
-        '大双': ['大双', '大单', '小单'],
-        '大单': ['大单', '大双', '小双']
-    }
-}
-
-def get_type_from_sum(sum_val: int) -> str:
-    size = '小' if sum_val < 14 else '大'
-    parity = '双' if sum_val % 2 == 0 else '单'
-    return size + parity
-
-def mulberry32(seed: int):
-    s = seed & 0xFFFFFFFF
-    def next_():
-        nonlocal s
-        s = (s + 0x6D2B79F5) & 0xFFFFFFFF
-        t = (s ^ (s >> 15)) & 0xFFFFFFFF
-        t = (t * (s | 1)) & 0xFFFFFFFF
-        t = (t ^ (t + ((t ^ (t >> 7)) * (61 | t)))) & 0xFFFFFFFF
-        return ((t ^ (t >> 14)) & 0xFFFFFFFF) / 4294967296
-    return next_
-
-def get_sequence_indexes(num: int) -> list:
-    idxs = []
-    for i, seq in enumerate(SEQUENCES):
-        if num in seq:
-            idxs.append(i)
-    return idxs
-
-def is_same_sequence(num1: int, num2: int) -> bool:
-    seq1 = get_sequence_indexes(num1)
-    seq2 = get_sequence_indexes(num2)
-    return any(i in seq2 for i in seq1)
-
-def split_and_sum_str(s: str) -> int:
-    s = s.replace('.', '')
-    return sum(int(c) for c in s)
-
-def predict_next_period(current_expect: str, current_sum: int, range_min: float = 0.25, range_max: float = 0.55) -> str:
-    match = re.search(r'\d+', current_expect)
-    seed = int(match.group()) if match else hash(current_expect) & 0xFFFFFFFF
-    rnd = mulberry32(seed)
-
-    random_num = rnd() * (range_max - range_min) + range_min
-    product = random_num * current_sum
-    rounded = round(product, 3)
-    final_sum = split_and_sum_str(str(rounded))
-    final_type = get_type_from_sum(final_sum)
-
-    rand_str = f"{random_num:.8f}".split('.')[1]
-    rand_first_three = rand_str[:3]
-    rand_sum = split_and_sum_str(rand_first_three)
-    same_seq = is_same_sequence(rand_sum, current_sum)
-
-    rule_key = 'sameSequence' if same_seq else 'diffSequence'
-    predict_groups = COMBINATION_RULES[rule_key][final_type]
-    return next(t for t in ALL_TYPES if t not in predict_groups)
-
-def generate_range_pool():
-    pool = []
-    step = 0.01
-    min_width = 0.2
-    max_width = 0.5
-    vals = [round(i * step, 2) for i in range(0, 101)]
-    for min_ in vals:
-        for max_ in vals:
-            if max_ - min_ >= min_width and max_ - min_ <= max_width:
-                pool.append((min_, max_))
-    return pool
-
-RANGE_POOL = generate_range_pool()
-
-class KillGroupPredictor:
-    """基于区间优化的杀组预测器（移植自报数机器人核心算法）"""
-    @staticmethod
-    def predict_kill(history: list) -> tuple[str, float]:
-        if len(history) < 2:
-            return "小单", 0.5
-        max_test = min(27, len(history) - 1)
-        best_range = (0.25, 0.55)
-        best_hits = -1
-
-        for rmin, rmax in RANGE_POOL:
-            hits = 0
-            for i in range(max_test):
-                target = history[i]
-                prev = history[i + 1]
-                kill = predict_next_period(prev['issue'], prev['sum'], rmin, rmax)
-                # 从 target['type'] 获取大小单双
-                actual = target.get('type', '')
-                if not actual:
-                    actual = "大" if target.get('sum', 0) >= 14 else "小" + ("单" if target.get('sum', 0) % 2 else "双")
-                if actual != kill:
-                    hits += 1
-            if hits > best_hits:
-                best_hits = hits
-                best_range = (rmin, rmax)
-
-        latest = history[0]
-        kill = predict_next_period(latest['issue'], latest['sum'], best_range[0], best_range[1])
-        confidence = min(0.99, max(0.25, best_hits / max_test if max_test > 0 else 0.5))
-        logger.info(f"[杀组预测] 区间回测命中 {best_hits}/{max_test}，选用区间 {best_range} -> 杀 {kill} (置信度 {confidence:.0%})")
-        return kill, confidence
-
-# 全局杀组预测器实例
-kill_group_predictor = KillGroupPredictor()
-
-
-# ==================== ABC 随机杀码预测器 ====================
-class ABC7CodePredictor:
-    """ABC随机杀码预测器
-    规则：每期从 0-9 中随机抽取指定数量的杀码。
-    """
-
-    @staticmethod
-    def _get_kill_nums(history, ball_type, kill_count=3):
-        # 随机杀码：从 0-9 中随机选取 kill_count 个不重复数字
-        count = max(1, min(9, kill_count))
-        return sorted(random.sample(range(10), count))
-
-    @classmethod
-    def get_all_predictions(cls, history, balls=None, kill_count=None):
-        if balls is None:
-            balls = ["A", "B", "C"]
-        if kill_count is None:
-            kill_count = 3
-        result = {}
-        for b in balls:
-            kills = cls._get_kill_nums(history, b, kill_count)
-            result[b] = {
-                "kill_nums": kills,
-                "bet_numbers": [n for n in range(10) if n not in kills],
-                "status": "随机杀码"
-            }
-        return result
-
-    @classmethod
-    def record_result(cls, ball_type, kill_nums, actual_num):
-        # 随机杀码无需跨期记忆，保留接口兼容
-        pass
-
-    @classmethod
-    def regenerate_abc_models(cls, history=None):
-        # 保持接口兼容，无需重新生成模型
-        logger.info("ABC 随机杀码预测器无需重新生成模型")
-        return 0
-
-
-abc_manager = ABC7CodePredictor()
-
-
 
 
 @dataclass
@@ -357,30 +168,17 @@ class UserState:
         self.custom_suffix = ""  
         self.last_betted_issue = ""
 
-        # 模式配置（ABC球 + 杀组）
+        # 模式配置（仅ABC球模式）
         self.selected_modes = ["ball"]
-        self.selected_balls = ["a"] 
+        self.selected_balls = ["a", "c"]
 
         # ABC独立设置
         self.ball_bet_amount = 1.0
-        self.abc_kill_count = 5           # 杀a球默认杀5码
         self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 63.0]  # ABC自定义倍投阶梯
         self.abc_consecutive_losses = 0   # ABC连败次数
 
         # 上期ABC杀球记录 {b_char: [killed_digits]}
         self.last_ball_kills = {}
-
-        # 杀组设置（基于30算法集成投票）
-        self.kill_enabled = False
-        self.kill_martingale_multiplier = 2.5
-        self.kill_consecutive_losses = 0
-        self.kill_history = []            # 最近3期杀组记录，避免连杀同一组合
-        self.last_killed_group = ""       # 上期实际杀的组合
-        self.kill_last_settled_issue = "" # 上期已结算期号
-
-        # 杀组动态比例设置
-        self.kill_initial_balance = 0.0   # 初始账户余额
-        self.kill_dynamic_ratio = 0.0     # 动态比例（0 表示禁用，如 0.01 表示 1%）
 
         # 附加下注特码与豹子配置（特码 0/27/1/26 各自独立）
         self.extra_special_numbers = []  # 例: ["0", "27", "1", "26"]
@@ -424,14 +222,12 @@ class UserState:
                         self.groups = data.get("groups", [])
                         self.custom_delay = data.get("custom_delay", 50.0)
                         self.custom_suffix = data.get("custom_suffix", "")
-                        # 兼容旧数据：过滤掉已删除的模式，支持 ball / kill
-                        loaded_modes = data.get("selected_modes", ["ball"])
-                        self.selected_modes = [m for m in loaded_modes if m in ("ball", "kill")]
-                        if not self.selected_modes:
-                            self.selected_modes = ["ball"]
-                        self.selected_balls = data.get("selected_balls", ["a"])
+                        self.selected_modes = ["ball"]
+                        loaded_balls = data.get("selected_balls", ["a", "c"])
+                        self.selected_balls = [b for b in loaded_balls if b in ("a", "c")]
+                        if not self.selected_balls:
+                            self.selected_balls = ["a", "c"]
                         self.ball_bet_amount = data.get("ball_bet_amount", 1.0)
-                        self.abc_kill_count = data.get("abc_kill_count", 1)
                         # 兼容旧版：旧版使用 abc_martingale_multiplier 字段，新版使用 abc_martingale_steps 列表
                         if "abc_martingale_steps" in data:
                             self.abc_martingale_steps = data.get("abc_martingale_steps", [1.0, 3.0, 7.0, 15.0, 31.0, 62.0])
@@ -442,15 +238,6 @@ class UserState:
                             self.abc_martingale_steps = [1.0, 3.0, 7.0, 15.0, 31.0, 62.0]
                         self.abc_consecutive_losses = data.get("abc_consecutive_losses", 0)
                         self.last_ball_kills = data.get("last_ball_kills", {})
-                        # 杀组
-                        self.kill_enabled = data.get("kill_enabled", False)
-                        self.kill_martingale_multiplier = data.get("kill_martingale_multiplier", 2.0)
-                        self.kill_consecutive_losses = data.get("kill_consecutive_losses", 0)
-                        self.kill_history = data.get("kill_history", [])
-                        self.last_killed_group = data.get("last_killed_group", "")
-                        self.kill_last_settled_issue = data.get("kill_last_settled_issue", "")
-                        self.kill_initial_balance = data.get("kill_initial_balance", 0.0)
-                        self.kill_dynamic_ratio = data.get("kill_dynamic_ratio", 0.0)
                         # 报数
                         self.broadcast_enabled = data.get("broadcast_enabled", False)
                         self.broadcast_channel = data.get("broadcast_channel", "")
@@ -498,18 +285,9 @@ class UserState:
                         "custom_delay": self.custom_delay, "custom_suffix": self.custom_suffix,
                         "selected_modes": self.selected_modes, "selected_balls": self.selected_balls,
                         "ball_bet_amount": self.ball_bet_amount,
-                        "abc_kill_count": self.abc_kill_count,
                         "abc_martingale_steps": self.abc_martingale_steps,
                         "abc_consecutive_losses": self.abc_consecutive_losses,
                         "last_ball_kills": self.last_ball_kills,
-                        "kill_enabled": self.kill_enabled,
-                        "kill_martingale_multiplier": self.kill_martingale_multiplier,
-                        "kill_consecutive_losses": self.kill_consecutive_losses,
-                        "kill_history": self.kill_history,
-                        "last_killed_group": self.last_killed_group,
-                        "kill_last_settled_issue": self.kill_last_settled_issue,
-                        "kill_initial_balance": self.kill_initial_balance,
-                        "kill_dynamic_ratio": self.kill_dynamic_ratio,
                         "broadcast_enabled": self.broadcast_enabled,
                         "broadcast_channel": self.broadcast_channel,
                         "broadcast_title": self.broadcast_title,
@@ -590,7 +368,7 @@ class DataFetcher:
                 pass
         return parsed
 
-# ==================== 4.5 杀组与播报辅助函数 ====================
+# ==================== 4.5 播报辅助函数 ====================
 def get_next_qihao(qihao):
     """根据当前期号计算下一期号（支持纯数字或末尾数字）"""
     s = str(qihao)
@@ -608,21 +386,14 @@ def get_next_qihao(qihao):
         return s
 
 def build_broadcast_message(title: str, history_records: list, max_records: int = 10) -> str:
-    """生成同款播报消息：期号.杀目标 状态+和值"""
+    """生成播报消息：期号与和值"""
     header = title.strip() if title else "预测播报"
     lines = [header]
     for rec in history_records[-max_records:]:
         q = str(rec.get('qihao', '--'))
         q = q[-4:] if len(q) >= 4 else q
-        kill = rec.get('kill_target', '--') or '--'
-        actual = rec.get('actual')
         s = str(rec.get('sum', '') or '')
-        if actual is None:
-            lines.append(f"{q}.杀{kill}")
-        elif actual != kill:
-            lines.append(f"{q}.杀{kill} 🀄{s}")
-        else:
-            lines.append(f"{q}.杀{kill} ❌{s}")
+        lines.append(f"{q}.和{s}")
     return "\n".join(lines)
 
 # ==================== 5. 系统中控与自动化调度中心 ====================
@@ -648,31 +419,13 @@ class SystemOrchestrator:
         return [
             [Button.inline(f"状态: {status}", data=b"noop"), Button.inline(login, data=b"login")],
             [Button.inline("🚀 启动挂机", data=b"start"), Button.inline("⏹ 暂停挂机", data=b"stop")],
-            [Button.inline("⚙️ 模式选择", data=b"select_mode")],
+            [Button.inline("🎱 选球设置", data=b"toggle_mode_ball")],
             [Button.inline("📢 报数设置", data=b"broadcast_settings")],
             [Button.inline("💎 附加特码/豹子配置", data=b"extra_config")],
             [Button.inline("💰 独立金额与风控设置", data=b"set_amounts_menu")],
             [Button.inline("➕ 绑定群组", data=b"add_g"), Button.inline("➖ 移除群组", data=b"del_g"), Button.inline("📋 群组列表", data=b"list_g")],
             [Button.inline(f"⏱ 投递延迟: {u_state.custom_delay}s", data=b"set_delay"), Button.inline("📝 设置自定义尾缀", data=b"set_suffix")],
-            [Button.inline("📖 模式介绍与说明", data=b"mode_intro_menu")],
             [Button.inline("🔄 重置今日盈亏", data=b"reset_pnl"), Button.inline("📈 实时收益战报", data=b"stats")]
-        ]
-
-    def mode_selection_keyboard(self, u_state: UserState):
-        def chk(m):
-            return "✅ " if m in u_state.selected_modes else "⬜ "
-        return [
-            [Button.inline(f"{chk('ball')}启用 ABC杀球模式", data=b"toggle_mode_ball")],
-            [Button.inline(f"{chk('kill')}启用 区间杀组模式", data=b"toggle_mode_kill")],
-            [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
-        ]
-
-    def mode_intro_keyboard(self):
-        return [
-            [Button.inline("ABC球模式介绍", data=b"intro_ball")],
-            [Button.inline("区间杀组模式介绍", data=b"intro_kill")],
-            [Button.inline("特码与豹子介绍", data=b"intro_extra")],
-            [Button.inline("⬅️ 返回主菜单", data=b"back_main")]
         ]
 
     def extra_config_keyboard(self, u_state: UserState):
@@ -699,10 +452,6 @@ class SystemOrchestrator:
         return [
             [Button.inline(f"ABC杀球单注金额: {u_state.ball_bet_amount}", data=b"set_ball_amount")],
             [Button.inline(f"ABC倍投阶梯: {steps_str}", data=b"set_abc_steps")],
-            [Button.inline(f"ABC杀码数量: {u_state.abc_kill_count}个", data=b"set_abc_kill_count")],
-            [Button.inline(f"杀组倍投倍数: {u_state.kill_martingale_multiplier}x", data=b"set_kill_multiplier")],
-            [Button.inline(f"杀组初始余额: {u_state.kill_initial_balance}", data=b"set_kill_initial_balance")],
-            [Button.inline(f"杀组动态比例: {u_state.kill_dynamic_ratio}", data=b"set_kill_dynamic_ratio")],
             [Button.inline(f"每日止盈线: {u_state.risk_mgr.daily_stop_profit}", data=b"set_stop_profit")],
             [Button.inline(f"每日止损线: {u_state.risk_mgr.daily_stop_loss}", data=b"set_stop_loss")],
             [Button.inline(f"风控状态: {risk_status}", data=b"noop")],
@@ -725,8 +474,8 @@ class SystemOrchestrator:
             checked = "✅ " if b_char in current_balls else "⬜ "
             return Button.inline(f"{checked}{name}", data=f"toggle_ball_{b_char}")
         return [
-            [mk_btn("a", "A球（第1位）"), mk_btn("b", "B球（第2位）"), mk_btn("c", "C球（第3位）")],
-            [Button.inline("💾 保存并返回设置", data=b"select_mode")]
+            [mk_btn("a", "A球（第1位）"), mk_btn("c", "C球（第3位）")],
+            [Button.inline("💾 保存并返回主菜单", data=b"back_main")]
         ]
 
     async def load_existing_users(self):
@@ -740,7 +489,7 @@ class SystemOrchestrator:
                         pass
 
     async def do_broadcast(self, u: UserState, data: MarketData):
-        """执行同款报数播报：核对上期并发送下期预测"""
+        """执行报数播报：核对上期并发送下期"""
         if not u.broadcast_enabled or not u.broadcast_channel or not u.client:
             return
 
@@ -762,15 +511,9 @@ class SystemOrchestrator:
                     pass
                 return
 
-            # 生成下一期预测
+            # 生成下一期记录
             next_qihao = get_next_qihao(data.issue_id)
             rec = {'qihao': next_qihao, 'sum': data.num_value}
-            try:
-                kill_target, _ = kill_group_predictor.predict_kill(u.history)
-                rec['kill_target'] = kill_target
-            except Exception:
-                rec['kill_target'] = '--'
-
             u.broadcast_history.append(rec)
             u.broadcast_history = u.broadcast_history[-20:]  # 保留最近20条
 
@@ -804,50 +547,22 @@ class SystemOrchestrator:
 
         # 重置上期实际下注记录
         u.last_ball_kills = {}
-        u.last_killed_group = ""
 
-        # ========== 1. 生成所有预测（ABC球 + 杀组） ==========
-        # ABC杀球模式：每期随机生成指定数量的杀码
-        abc_multiplier = 1.0
-        abc_pred_info = {}
+        # ABC杀球模式：A球随机杀5码，C球按预测杀1码
+        abc_multiplier = u.get_abc_multiplier()
         if "ball" in u.selected_modes:
-            abc_multiplier = u.get_abc_multiplier()
-            count = u.abc_kill_count
-            try:
-                preds = abc_manager.get_all_predictions(
-                    u.history,
-                    balls=[b_char.upper() for b_char in u.selected_balls],
-                    kill_count=count
-                )
-                for b_char in u.selected_balls:
-                    pred_info = preds.get(b_char.upper(), {})
-                    kill_nums = pred_info.get("kill_nums")
-                    if not kill_nums:
-                        kill_nums = random.sample(range(10), count)
-                    u.last_ball_kills[b_char] = kill_nums
-                    abc_pred_info[b_char] = pred_info
-                active_descriptions.append(f"ABC杀球(随机杀{count}码,倍投{abc_multiplier:.1f}x)")
-            except Exception as e:
-                logger.error(f"[用户 {u.user_id}] ABC随机杀码预测失败: {e}")
+            for b_char in u.selected_balls:
+                if b_char == "a":
+                    killed_digits = get_a_kills()
+                    u.last_ball_kills[b_char] = killed_digits
+                    active_descriptions.append(f"A球随机杀5码(倍投{abc_multiplier:.1f}x)")
+                elif b_char == "c":
+                    killed_digits = get_c_kills(u.history)
+                    u.last_ball_kills[b_char] = killed_digits
+                    active_descriptions.append(f"C球预测杀1码(倍投{abc_multiplier:.1f}x)")
 
-        # 区间杀组模式
-        kill_target_for_bet = None
-        kill_confidence_for_bet = 0.5
-        kill_multiplier = 1.0
-        if "kill" in u.selected_modes and u.kill_enabled:
-            try:
-                kill_target, confidence = kill_group_predictor.predict_kill(u.history)
-
-                kill_target_for_bet = kill_target
-                kill_confidence_for_bet = confidence
-                u.last_killed_group = kill_target
-                kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                active_descriptions.append(f"区间杀组(杀{kill_target},置信{confidence:.0%},倍投{kill_multiplier:.1f}x)")
-            except Exception as e:
-                logger.error(f"[用户 {u.user_id}] 杀组预测失败: {e}")
-
-        # ========== 2. 构造实际下注消息 ==========
-        if "ball" in u.selected_modes and u.last_ball_kills:
+        # 构造实际下注消息
+        if u.last_ball_kills:
             single_bet = u.ball_bet_amount * abc_multiplier
             for b_char in u.selected_balls:
                 killed_digits = u.last_ball_kills.get(b_char)
@@ -856,19 +571,6 @@ class SystemOrchestrator:
                 for d in range(10):
                     if d not in killed_digits:
                         all_bet_lines.append(f"{b_char}{d}/{int(single_bet)}")
-
-        if "kill" in u.selected_modes and u.kill_enabled and kill_target_for_bet:
-            # 杀组金额完全由动态比例决定：根据初始余额 + 今日实时盈亏计算
-            if u.kill_dynamic_ratio <= 0:
-                logger.info(f"[用户 {u.user_id}] 杀组动态比例未设置，跳过杀组下注")
-            else:
-                current_balance = u.kill_initial_balance + u.risk_mgr.daily_pnl
-                base_bet = max(1.0, current_balance * u.kill_dynamic_ratio) * kill_multiplier
-                bet_combos = [c for c in COMBOS if c != kill_target_for_bet]
-                for c in bet_combos:
-                    combo_bet = base_bet * 1.165 if c in ("大双", "小单") else base_bet
-                    bet_str = f"{combo_bet:.1f}" if combo_bet != int(combo_bet) else f"{int(combo_bet)}"
-                    all_bet_lines.append(f"{c}/{bet_str}")
 
         # 附加特码与豹子下注（特码各自独立）
         for num in ["0", "27", "1", "26"]:
@@ -904,22 +606,15 @@ class SystemOrchestrator:
             u.last_betted_issue = issue_id
             u.save()
             try:
-                mode_label = "+".join(active_descriptions)
+                mode_label = "+".join(active_descriptions) if active_descriptions else "ABC杀球"
                 notify_lines = [
                     f"【自动化下注通知】",
                     f"--------------------",
                     f"期号: `{issue_id}`",
                     f"启用模式: `{mode_label}`",
-                ]
-                if kill_target_for_bet:
-                    notify_lines.extend([
-                        f"区间杀组: `{kill_target_for_bet}`",
-                        f"置信度: `{kill_confidence_for_bet:.0%}`",
-                    ])
-                notify_lines.extend([
                     f"下注排版:\n`{bet_msg.replace(chr(10), ' | ')}`",
                     f"--------------------"
-                ])
+                ]
                 await self.bot.send_message(u.user_id, "\n".join(notify_lines))
             except:
                 pass
@@ -932,7 +627,6 @@ class SystemOrchestrator:
             status_text = "运行中" if u.is_active else "已停止"
             if not can_bet:
                 status_text += f" (风控: {reason})"
-            kill_status = "启用" if ("kill" in u.selected_modes and u.kill_enabled) else "未启用"
             bc_status = "开启" if u.broadcast_enabled else "关闭"
             await event.respond(
                 f"欢迎使用 PC28量子智能量化挂机系统\n"
@@ -940,10 +634,11 @@ class SystemOrchestrator:
                 f"运行状态概览:\n"
                 f"• 挂机状态: `{status_text}`\n"
                 f"• 绑定群组: `{len(u.groups)}` 个\n"
-                f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
+                f"• 选球位次: {','.join([b.upper() for b in u.selected_balls])}\n"
+                f"• A球杀码: `随机杀5码`\n"
+                f"• C球杀码: `预测杀1码`\n"
                 f"• ABC倍投阶梯: `{','.join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)}`\n"
                 f"• ABC当前倍投: `{u.get_abc_multiplier()}x`\n"
-                f"• 区间杀组: `{kill_status}`\n"
                 f"• 报数播报: `{bc_status}`\n"
                 f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                 f"--------------------",
@@ -960,33 +655,15 @@ class SystemOrchestrator:
                 await event.answer()
                 return
 
-            if data == "select_mode":
-                await event.edit("请选择要启用的模式", buttons=self.mode_selection_keyboard(u))
-                return
-
             if data == "toggle_mode_ball":
-                if "ball" in u.selected_modes:
-                    if len(u.selected_modes) > 1:
-                        u.selected_modes.remove("ball")
-                else:
-                    u.selected_modes.append("ball")
-                u.save()
                 await event.edit("请选择需要参与杀球的位次（可多选）", buttons=self.ball_selection_keyboard(u.selected_balls))
-                return
-
-            if data == "toggle_mode_kill":
-                if "kill" in u.selected_modes:
-                    u.selected_modes.remove("kill")
-                    u.kill_enabled = False
-                else:
-                    u.selected_modes.append("kill")
-                    u.kill_enabled = True
-                u.save()
-                await event.edit("请选择要启用的模式", buttons=self.mode_selection_keyboard(u))
                 return
 
             if data.startswith("toggle_ball_"):
                 b_char = data.replace("toggle_ball_", "")
+                if b_char not in ("a", "c"):
+                    await event.answer("仅支持 A球 与 C球", alert=True)
+                    return
                 if b_char in u.selected_balls:
                     if len(u.selected_balls) > 1:
                         u.selected_balls.remove(b_char)
@@ -998,20 +675,6 @@ class SystemOrchestrator:
 
             if data == "set_amounts_menu":
                 await event.edit("请选择需要修改的金额或风控参数", buttons=self.amounts_menu_keyboard(u))
-                return
-
-            if data == "mode_intro_menu":
-                await event.edit("请选择要查看的模式介绍说明", buttons=self.mode_intro_keyboard())
-                return
-
-            if data == "intro_ball":
-                await event.answer("ABC杀球模式：每期从0-9中随机抽取指定数量的杀码。A/B/C球各自独立随机生成杀码，系统自动投递剩余数字。中奖倍率9.99。", alert=True)
-                return
-            if data == "intro_kill":
-                await event.answer("区间杀组模式：集成30种预测算法（马尔可夫、随机森林、GBDT、SVM、贝叶斯、KNN等）投票，预测下一期最可能开出的组合并将其杀掉，自动投注其余3个组合。支持倍投与连败重置。", alert=True)
-                return
-            if data == "intro_extra":
-                await event.answer("特码与豹子：支持独立设置金额并附加下注特码（0、27、1、26）以及豹子。", alert=True)
                 return
 
             if data == "extra_config":
@@ -1071,24 +734,6 @@ class SystemOrchestrator:
                 )
                 return
 
-            if data == "set_kill_multiplier":
-                self.user_login_states[sid] = "WAIT_KILL_MULTIPLIER"
-                await event.respond(f"当前杀组倍投倍数: `{u.kill_martingale_multiplier}x`\n请输入新倍数(如 2.0 或 3.0):")
-                return
-
-            if data == "set_kill_initial_balance":
-                self.user_login_states[sid] = "WAIT_KILL_INITIAL_BALANCE"
-                await event.respond(f"当前杀组初始余额: `{u.kill_initial_balance}`\n请输入新的初始账户余额:")
-                return
-
-            if data == "set_kill_dynamic_ratio":
-                self.user_login_states[sid] = "WAIT_KILL_DYNAMIC_RATIO"
-                await event.respond(
-                    f"当前杀组动态比例: `{u.kill_dynamic_ratio}`\n"
-                    f"请输入比例(如 `0.01` 表示余额的 1%，输入 `0` 表示禁用动态比例，使用固定杀组单注金额):"
-                )
-                return
-
             if data == "broadcast_settings":
                 await event.edit("报数播报设置", buttons=self.broadcast_settings_keyboard(u))
                 return
@@ -1119,17 +764,17 @@ class SystemOrchestrator:
                 status_text = "运行中" if u.is_active else "已停止"
                 if not can_bet:
                     status_text += f" (风控: {reason})"
-                kill_status = "启用" if ("kill" in u.selected_modes and u.kill_enabled) else "未启用"
                 bc_status = "开启" if u.broadcast_enabled else "关闭"
                 await event.edit(
                     f"主控制面板\n"
                     f"--------------------\n"
                     f"• 挂机状态: `{status_text}`\n"
                     f"• 绑定群组: `{len(u.groups)}` 个\n"
-                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
+                    f"• 选球位次: {','.join([b.upper() for b in u.selected_balls])}\n"
+                    f"• A球杀码: `随机杀5码`\n"
+                    f"• C球杀码: `预测杀1码`\n"
                     f"• ABC倍投阶梯: `{','.join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)}`\n"
                     f"• ABC当前倍投: `{u.get_abc_multiplier()}x`\n"
-                    f"• 区间杀组: `{kill_status}`\n"
                     f"• 报数播报: `{bc_status}`\n"
                     f"• 今日盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
                     f"--------------------",
@@ -1161,514 +806,4 @@ class SystemOrchestrator:
                 if u.is_logged_in:
                     u.is_logged_in = u.is_active = False
                     if u.client:
-                        await u.client.disconnect()
-                    u.save()
-                    await event.edit("协议号已安全登出。", buttons=self.main_keyboard(u))
-                else:
-                    self.user_login_states[sid] = "WAIT_PHONE"
-                    await event.respond("请发送您的 Telegram 手机号:")
-            elif data == "add_g":
-                self.user_login_states[sid] = "WAIT_GROUP"
-                await event.respond("请发送目标群组的 Username 或 ID:")
-            elif data == "del_g":
-                if not u.groups:
-                    await event.respond("当前没有绑定任何群组。")
-                else:
-                    self.user_login_states[sid] = "WAIT_DEL_GROUP"
-                    await event.respond("发送对应的序号以移除群组:\n" + "\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]))
-            elif data == "list_g":
-                await event.respond("已绑定的目标群组列表:\n" + ("\n".join([f"{i+1}. {g}" for i, g in enumerate(u.groups)]) if u.groups else "无"))
-            elif data == "set_ball_amount":
-                self.user_login_states[sid] = "WAIT_BALL_AMOUNT"
-                await event.respond(f"当前ABC杀球单注金额: `{u.ball_bet_amount}`\n请输入新金额:")
-            elif data == "set_abc_steps":
-                self.user_login_states[sid] = "WAIT_ABC_STEPS"
-                steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
-                await event.respond(
-                    f"当前ABC倍投阶梯: `{steps_str}`\n"
-                    f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`\n"
-                    f"请输入新的倍投阶梯（用英文逗号分隔，如 `1,3,7,15,31,63`）:"
-                )
-            elif data == "set_abc_kill_count":
-                self.user_login_states[sid] = "WAIT_ABC_KILL_COUNT"
-                await event.respond(f"当前ABC杀码数量: `{u.abc_kill_count}`个\n请输入数量(1-9):")
-            elif data == "set_stop_profit":
-                self.user_login_states[sid] = "WAIT_STOP_PROFIT"
-                await event.respond(f"当前每日止盈线: `{u.risk_mgr.daily_stop_profit}`\n请输入新金额(输入 0 为不限制):")
-            elif data == "set_stop_loss":
-                self.user_login_states[sid] = "WAIT_STOP_LOSS"
-                await event.respond(f"当前每日止损线: `{u.risk_mgr.daily_stop_loss}`\n请输入新金额(输入 0 为不限制):")
-            elif data == "reset_pnl":
-                old_pnl = u.reset_daily_pnl()
-                await event.respond(
-                    f"✅ 已重置今日实时盈亏\n"
-                    f"重置前: `{old_pnl:+.2f}`\n"
-                    f"重置后: `0.00`",
-                    buttons=self.main_keyboard(u)
-                )
-            elif data == "stats":
-                rm = u.risk_mgr
-                current_multiplier = u.get_abc_multiplier()
-                kill_multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
-                can_bet, reason = rm.can_bet()
-                triggered, trigger_reason = rm.check_triggered()
-                kill_current_balance = u.kill_initial_balance + rm.daily_pnl
-                if u.kill_dynamic_ratio > 0:
-                    kill_calc_base = max(1.0, kill_current_balance * u.kill_dynamic_ratio) * kill_multiplier
-                    kill_dynamic_status = f"动态({u.kill_dynamic_ratio})"
-                else:
-                    kill_calc_base = 0.0
-                    kill_dynamic_status = "未设置"
-                await event.respond(
-                    f"详细收益战报与风控统计\n"
-                    f"--------------------\n"
-                    f"• 今日总盈亏: `{rm.daily_pnl:+.2f}`\n"
-                    f"• ABC杀码数量: `{u.abc_kill_count}` 个\n"
-                    f"• ABC倍投阶梯: `{steps_str}`\n"
-                    f"• ABC当前连败: `{u.abc_consecutive_losses}` 次\n"
-                    f"• ABC当前计算单注: `{u.ball_bet_amount * current_multiplier:.2f}`\n"
-                    f"• 杀组状态: `{'启用' if ('kill' in u.selected_modes and u.kill_enabled) else '未启用'}`\n"
-                    f"• 杀组倍投倍数: `{u.kill_martingale_multiplier}x`\n"
-                    f"• 杀组当前连败: `{u.kill_consecutive_losses}` 次\n"
-                    f"• 杀组初始余额: `{u.kill_initial_balance:.2f}`\n"
-                    f"• 杀组当前余额: `{kill_current_balance:.2f}`\n"
-                    f"• 杀组动态比例: `{kill_dynamic_status}`\n"
-                    f"• 杀组当前计算单注: `{kill_calc_base:.2f}`\n"
-                    f"• 报数播报: `{'开启' if u.broadcast_enabled else '关闭'}` (`{u.broadcast_count}` 期)\n"
-                    f"• 每日止盈线: `{rm.daily_stop_profit}`\n"
-                    f"• 每日止损线: `{rm.daily_stop_loss}`\n"
-                    f"• 风控状态: `{'🔴 已触发: ' + trigger_reason if triggered else '🟢 正常'}`\n"
-                    f"--------------------"
-                )
-
-        @self.bot.on(events.NewMessage)
-        async def handler_text(event):
-            if event.text.startswith("/"):
-                return
-            sid = event.sender_id
-            state = self.user_login_states.get(sid)
-            u = self.get_user_state(sid)
-
-            if state == "WAIT_PHONE":
-                u.phone = event.text.strip()
-                try:
-                    client = TelegramClient(os.path.join(SESSIONS_DIR, f"user_{sid}"), API_ID, API_HASH)
-                    await client.connect()
-                    req = await client.send_code_request(u.phone)
-                    u.client, u.temp_phone_code_hash = client, req.phone_code_hash
-                    self.user_login_states[sid] = "WAIT_CODE"
-                    await event.respond("验证码已发送到您的 Telegram，请在 1 分钟内输入:")
-                except Exception as e:
-                    await event.respond(f"发送验证码失败: {e}")
-                    self.user_login_states.pop(sid, None)
-            elif state == "WAIT_CODE":
-                code_text = event.text.strip()
-                try:
-                    await u.client.sign_in(u.phone, code_text, phone_code_hash=u.temp_phone_code_hash)
-                    u.is_logged_in = True
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond("协议号登录成功!", buttons=self.main_keyboard(u))
-                except SessionPasswordNeededError:
-                    self.user_login_states[sid] = "WAIT_2FA"
-                    await event.respond("检测到账户开启了两步验证 (2FA)，请输入密码:")
-                except (PhoneCodeExpiredError, PhoneCodeInvalidError) as pce:
-                    await event.respond(f"验证码已失效或错误: {pce}")
-                    self.user_login_states.pop(sid, None)
-                except Exception as e:
-                    await event.respond(f"登录失败: {e}")
-                    self.user_login_states.pop(sid, None)
-            elif state == "WAIT_2FA":
-                try:
-                    await u.client.sign_in(password=event.text.strip())
-                    u.is_logged_in = True
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond("2FA 验证通过，登录成功!", buttons=self.main_keyboard(u))
-                except Exception as e:
-                    await event.respond(f"密码错误: {e}")
-            elif state == "WAIT_GROUP":
-                grp = event.text.strip()
-                if grp not in u.groups:
-                    u.groups.append(grp)
-                    u.save()
-                await event.respond(f"成功绑定群组: `{grp}`", buttons=self.main_keyboard(u))
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_DEL_GROUP":
-                val = event.text.strip()
-                if val.isdigit() and 0 <= int(val) - 1 < len(u.groups):
-                    rmv = u.groups.pop(int(val) - 1)
-                    u.save()
-                    await event.respond(f"已成功移除群组: `{rmv}`", buttons=self.main_keyboard(u))
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_DELAY":
-                try:
-                    u.custom_delay = max(0.0, float(event.text.strip()))
-                    u.save()
-                    await event.respond(f"投递延迟更新为: `{u.custom_delay}s`", buttons=self.main_keyboard(u))
-                except:
-                    await event.respond("请输入有效的秒数数字")
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_SUFFIX":
-                txt = event.text.strip()
-                u.custom_suffix = "" if txt.lower() == "clear" else txt
-                u.save()
-                await event.respond("独立尾缀已更新", buttons=self.main_keyboard(u))
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_BALL_AMOUNT":
-                try:
-                    u.ball_bet_amount = max(1.0, float(event.text.strip()))
-                    u.save()
-                    await event.respond("ABC杀球单注金额更新成功", buttons=self.main_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_ABC_STEPS":
-                try:
-                    txt = event.text.strip().replace("，", ",").replace(" ", "")
-                    parts = [p for p in txt.split(",") if p]
-                    if not parts:
-                        raise ValueError("空列表")
-                    steps = []
-                    for p in parts:
-                        v = float(p)
-                        if v < 0:
-                            raise ValueError("负数")
-                        steps.append(v)
-                    u.abc_martingale_steps = steps
-                    u.save()
-                    steps_str = ",".join(str(int(s)) if s == int(s) else str(s) for s in u.abc_martingale_steps)
-                    await event.respond(
-                        f"ABC倍投阶梯更新为: `{steps_str}`\n"
-                        f"当前连败 `{u.abc_consecutive_losses}` 次，对应倍投 `{u.get_abc_multiplier()}x`",
-                        buttons=self.main_keyboard(u)
-                    )
-                except Exception as e:
-                    logger.warning(f"用户 {sid} 设置ABC倍投阶梯失败: {e}")
-                    await event.respond("格式错误，请输入逗号分隔的正数，例如: `1,3,7,15,31,63`")
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_ABC_KILL_COUNT":
-                try:
-                    val = int(event.text.strip())
-                    u.abc_kill_count = max(1, min(9, val))
-                    u.save()
-                    await event.respond(f"ABC杀码数量更新为: `{u.abc_kill_count}`个", buttons=self.main_keyboard(u))
-                except:
-                    await event.respond("请输入1-9之间的整数")
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_STOP_PROFIT":
-                try:
-                    val = float(event.text.strip())
-                    u.risk_mgr.daily_stop_profit = max(0.0, val)
-                    u.save()
-                    await event.respond(f"每日止盈线更新为: `{u.risk_mgr.daily_stop_profit}`", buttons=self.main_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_STOP_LOSS":
-                try:
-                    val = float(event.text.strip())
-                    u.risk_mgr.daily_stop_loss = max(0.0, val)
-                    u.save()
-                    await event.respond(f"每日止损线更新为: `{u.risk_mgr.daily_stop_loss}`", buttons=self.main_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                self.user_login_states.pop(sid, None)
-            elif state == "WAIT_EXTRA_AMOUNTS":
-                try:
-                    parts = event.text.strip().replace("，", ",").split(",")
-                    amts = [float(p.strip()) for p in parts if p.strip()]
-                    keys = ["0", "27", "1", "26", "baozi"]
-                    if len(amts) == 1:
-                        for k in keys:
-                            u.extra_bet_amounts[k] = amts[0]
-                    elif len(amts) == 2:
-                        for k in keys:
-                            u.extra_bet_amounts[k] = amts[1] if k == "baozi" else amts[0]
-                    elif len(amts) >= 5:
-                        for i, k in enumerate(keys):
-                            u.extra_bet_amounts[k] = amts[i]
-                    else:
-                        # 3 或 4 个金额时按顺序填充，其余保持不变
-                        for i, k in enumerate(keys):
-                            if i < len(amts):
-                                u.extra_bet_amounts[k] = amts[i]
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond("特码与豹子独立金额更新成功", buttons=self.extra_config_keyboard(u))
-                except:
-                    await event.respond("格式错误，请重新输入，例如: `100,100,100,100,200`")
-            elif state == "WAIT_KILL_MULTIPLIER":
-                try:
-                    val = float(event.text.strip())
-                    u.kill_martingale_multiplier = max(1.0, val)
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond(f"杀组倍投倍数更新为: `{u.kill_martingale_multiplier}x`", buttons=self.amounts_menu_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                    self.user_login_states.pop(sid, None)
-            elif state == "WAIT_KILL_INITIAL_BALANCE":
-                try:
-                    u.kill_initial_balance = max(0.0, float(event.text.strip()))
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond(f"杀组初始余额更新为: `{u.kill_initial_balance}`", buttons=self.amounts_menu_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                    self.user_login_states.pop(sid, None)
-            elif state == "WAIT_KILL_DYNAMIC_RATIO":
-                try:
-                    val = float(event.text.strip())
-                    u.kill_dynamic_ratio = max(0.0, min(1.0, val))
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond(f"杀组动态比例更新为: `{u.kill_dynamic_ratio}`", buttons=self.amounts_menu_keyboard(u))
-                except:
-                    await event.respond("请输入有效数字")
-                    self.user_login_states.pop(sid, None)
-            elif state == "WAIT_BROADCAST_CHANNEL":
-                u.broadcast_channel = event.text.strip()
-                u.save()
-                self.user_login_states.pop(sid, None)
-                await event.respond(f"播报频道更新为: `{u.broadcast_channel}`", buttons=self.broadcast_settings_keyboard(u))
-            elif state == "WAIT_BROADCAST_TITLE":
-                u.broadcast_title = event.text.strip() or "预测播报"
-                u.save()
-                self.user_login_states.pop(sid, None)
-                await event.respond(f"播报标题更新为: `{u.broadcast_title}`", buttons=self.broadcast_settings_keyboard(u))
-            elif state == "WAIT_BROADCAST_MAX":
-                try:
-                    u.broadcast_max_periods = max(0, int(event.text.strip()))
-                    u.save()
-                    self.user_login_states.pop(sid, None)
-                    await event.respond(f"最大播报期数更新为: `{'∞' if u.broadcast_max_periods <= 0 else u.broadcast_max_periods}`", buttons=self.broadcast_settings_keyboard(u))
-                except:
-                    await event.respond("请输入非负整数")
-                    self.user_login_states.pop(sid, None)
-
-    async def poll_api(self):
-        """24小时全自动轮询与结算守护"""
-        logger.info("24小时永动API轮询与结算守护已启动（区间优化杀组算法）...")
-        while True:
-            try:
-                data = await DataFetcher.fetch_latest()
-                if data and data.issue_id != self.last_issue_id:
-                    self.last_issue_id = data.issue_id
-                    for uid, u in self.users.items():
-                        if u.is_logged_in:
-                            # 初始化本期各模式盈亏
-                            total_abc_pnl = 0.0
-                            kill_pnl = 0.0
-
-                            # ABC球模式结算逻辑（中奖倍率 9.99，按整体盈亏判定输赢）
-                            if "ball" in u.selected_modes and u.last_ball_kills:
-                                nums = [int(d) for d in data.number_str if d.isdigit()]
-                                ball_index_map = {"a": 0, "b": 1, "c": 2}
-                                has_any_bet = False
-
-                                for b_char in u.selected_balls:
-                                    if b_char in u.last_ball_kills and b_char in ball_index_map:
-                                        killed_list = u.last_ball_kills[b_char]
-                                        idx = ball_index_map[b_char]
-                                        if len(nums) > idx:
-                                            has_any_bet = True
-                                            actual_digit = nums[idx]
-                                            multiplier = u.get_abc_multiplier()
-                                            single_bet = u.ball_bet_amount * multiplier
-                                            buy_count = 10 - u.abc_kill_count
-                                            cost = buy_count * single_bet
-
-                                            if actual_digit not in killed_list:
-                                                win_amount = single_bet * 9.99
-                                                total_abc_pnl += (win_amount - cost)
-                                                logger.info(f"[用户 {uid}] ABC球 {b_char.upper()}球 中奖: 开奖{actual_digit} 不在杀码{killed_list}, 返还{win_amount:.2f}, 成本{cost:.2f}")
-                                            else:
-                                                total_abc_pnl -= cost
-                                                logger.info(f"[用户 {uid}] ABC球 {b_char.upper()}球 未中: 开奖{actual_digit} 在杀码{killed_list}, 亏损{cost:.2f}")
-                                            # 记录ABC结果（新7码预测器无需跨期记忆，保留接口兼容）
-                                            try:
-                                                abc_manager.record_result(b_char.upper(), killed_list, actual_digit)
-                                            except Exception as e:
-                                                logger.warning(f"记录ABC结果失败: {e}")
-
-                                if has_any_bet:
-                                    if total_abc_pnl != 0:
-                                        u.risk_mgr.add_pnl(total_abc_pnl)
-                                    if total_abc_pnl > 0:
-                                        u.abc_consecutive_losses = 0
-                                        logger.info(f"[用户 {uid}] ABC球本期整体盈利 {total_abc_pnl:.2f}，倍投重置归零")
-                                    else:
-                                        u.abc_consecutive_losses += 1
-                                        logger.info(f"[用户 {uid}] ABC球本期整体亏损 {total_abc_pnl:.2f}，连败+1: {u.abc_consecutive_losses}")
-
-                                u.last_ball_kills = {}
-
-                            # 区间杀组模式结算逻辑（杀中即亏损，杀错即盈利，小单/大双赔率3.71，大单/小双赔率4.32；大双/小单投注金额为基础金额*1.165）
-                            if "kill" in u.selected_modes and u.kill_enabled and u.last_killed_group:
-                                if u.kill_last_settled_issue != data.issue_id:
-                                    u.kill_last_settled_issue = data.issue_id
-                                    actual_combo = data.combination
-                                    last_kill = u.last_killed_group
-                                    multiplier = u.kill_martingale_multiplier ** u.kill_consecutive_losses
-                                    # 杀组金额完全由动态比例决定：根据初始余额 + 今日实时盈亏计算
-                                    if u.kill_dynamic_ratio <= 0:
-                                        logger.info(f"[用户 {uid}] 杀组动态比例未设置，跳过杀组结算")
-                                        continue
-                                    current_balance = u.kill_initial_balance + u.risk_mgr.daily_pnl
-                                    base_bet = max(1.0, current_balance * u.kill_dynamic_ratio) * multiplier
-                                    bet_combos = [c for c in COMBOS if c != last_kill]
-                                    def _kill_bet_amount(c):
-                                        return base_bet * 1.165 if c in ("大双", "小单") else base_bet
-                                    cost = sum(_kill_bet_amount(c) for c in bet_combos)
-
-                                    if actual_combo == last_kill:
-                                        # 杀中，亏损全部本金
-                                        kill_pnl = -cost
-                                        u.kill_consecutive_losses += 1
-                                        logger.info(f"[用户 {uid}] 杀组命中: 杀{last_kill}=开{actual_combo}, 亏损{cost:.2f}, 连败{u.kill_consecutive_losses}")
-                                    else:
-                                        # 没杀中，3组中1组，按实际中奖组合赔率结算
-                                        if actual_combo in ("小单", "大双"):
-                                            odds = 3.71
-                                        else:
-                                            odds = 4.32
-                                        win_amount = _kill_bet_amount(actual_combo) * odds
-                                        kill_pnl = win_amount - cost
-                                        u.kill_consecutive_losses = 0
-                                        logger.info(f"[用户 {uid}] 杀组未中: 杀{last_kill}=开{actual_combo}(赔率{odds}), 盈利{kill_pnl:.2f}, 连败清零")
-
-                                    u.risk_mgr.add_pnl(kill_pnl)
-                                    u.save()
-
-                                    try:
-                                        await self.bot.send_message(
-                                            u.user_id,
-                                            f"【杀组结算通知】\n"
-                                            f"--------------------\n"
-                                            f"期号: `{data.issue_id}`\n"
-                                            f"开奖组合: `{actual_combo}`\n"
-                                            f"上期杀组: `{last_kill}`\n"
-                                            f"本局盈亏: `{kill_pnl:+.2f}`\n"
-                                            f"杀组连败: `{u.kill_consecutive_losses}`\n"
-                                            f"--------------------"
-                                        )
-                                    except:
-                                        pass
-
-                            u.history.insert(0, {"nums": [int(d) for d in data.number_str if d.isdigit()], "sum": data.num_value, "type": data.combination, "issue": data.issue_id})
-                            if len(u.history) > 120:
-                                u.history = u.history[:120]
-                            u.save()
-
-                            # 报数播报（同款格式）
-                            await self.do_broadcast(u, data)
-
-                            # 结算后检查是否触发止盈/止损，触发则自动暂停挂机
-                            triggered, trigger_reason = u.risk_mgr.check_triggered()
-                            if triggered and u.is_active:
-                                u.is_active = False
-                                u.save()
-                                logger.warning(f"[用户 {uid}] 触发风控自动暂停: {trigger_reason}, 盈亏={u.risk_mgr.daily_pnl:+.2f}")
-                                try:
-                                    await self.bot.send_message(
-                                        u.user_id,
-                                        f"【🚨 风控自动暂停通知】\n"
-                                        f"--------------------\n"
-                                        f"期号: `{data.issue_id}`\n"
-                                        f"触发原因: `{trigger_reason}`\n"
-                                        f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
-                                        f"--------------------\n"
-                                        f"挂机已自动暂停，如需继续请手动点击 🚀 启动挂机"
-                                    )
-                                except:
-                                    pass
-
-                            try:
-                                await self.bot.send_message(
-                                    u.user_id,
-                                    f"【开奖结果通知】\n"
-                                    f"--------------------\n"
-                                    f"期号: `{data.issue_id}`\n"
-                                    f"开奖: `{data.number_str}` (和值: `{data.num_value}` -> `{data.combination}`)\n"
-                                    f"今日实时盈亏: `{u.risk_mgr.daily_pnl:+.2f}`\n"
-                                    f"--------------------"
-                                )
-                            except:
-                                pass
-
-                            if u.is_active:
-                                next_issue = get_next_qihao(data.issue_id)
-                                asyncio.create_task(self.handle_new_issue_bet(u, next_issue, data))
-            except Exception as e:
-                logger.error(f"轮询守护异常自动隔离: {e}")
-
-            await asyncio.sleep(4)
-
-    async def start(self):
-        if self.bot is None:
-            logger.warning("Bot 未初始化，跳过 Telegram 启动，仅保留 Gradio 控制台")
-            return
-        await self.bot.start(bot_token=BOT_TOKEN)
-        await self.register_handlers()
-        await self.load_existing_users()
-        logger.info("PC28量化挂机中控系统已上线（区间优化杀组算法）!")
-        asyncio.create_task(self.poll_api())
-        await self.bot.run_until_disconnected()
-
-# ==================== 6. Gradio 后台控制台 ====================
-# 全局引用，让 Gradio 控件可以操作后台 orchestrator
-_orchestrator: Optional[SystemOrchestrator] = None
-
-
-def start_bot_thread():
-    global _orchestrator
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    orchestrator = SystemOrchestrator()
-    _orchestrator = orchestrator
-    try:
-        loop.run_until_complete(orchestrator.start())
-    except Exception as e:
-        logger.error(f"Bot 运行异常: {e}")
-
-
-def gradio_reset_daily_pnl():
-    """Gradio 按钮回调：清空所有用户的今日实时盈亏"""
-    if _orchestrator is None:
-        return "系统尚未启动，无法重置"
-    results = []
-    for uid, u in list(_orchestrator.users.items()):
-        old = u.reset_daily_pnl()
-        results.append(f"用户 {uid}: {old:+.2f} -> 0.00")
-    if not results:
-        return "当前没有用户数据，已清空 0 条"
-    return "✅ 已重置今日实时盈亏\n" + "\n".join(results)
-
-
-with gr.Blocks(title="PC28量化智能挂机系统") as demo:
-    gr.Markdown("# 🚀 PC28量化智能挂机系统 - 24小时永动中控")
-    gr.Markdown("已集成区间优化杀组预测算法（基于期号伪随机+区间缩放+序列规则回测选优）与同款报数播报功能。ABC杀球模式采用随机杀码、支持自定义杀码数量、可配置倍投倍数（中奖倍率9.99），盈亏实时独立结算。达到止盈/止损线自动暂停，需手动重启。保留特码与豹子附加下注。")
-    with gr.Row():
-        reset_btn = gr.Button("🔄 重置今日实时盈亏", variant="primary")
-    reset_result = gr.Textbox(label="重置结果", interactive=False, lines=5)
-    reset_btn.click(fn=gradio_reset_daily_pnl, outputs=reset_result)
-    gr.Markdown("---")
-    gr.Markdown("<div style='text-align: center; color: gray;'>PC28量化挂机中控台 © 2026</div>")
-
-# 用 FastAPI 包装 Gradio，提供 /health 端点供 Railway 等平台做健康检查
-fastapi_app = FastAPI(title="PC28量化智能挂机系统")
-
-@fastapi_app.get("/health")
-def health_check():
-    return {"status": "healthy", "algorithms": 1}
-
-fastapi_app = mount_gradio_app(fastapi_app, demo, path="/")
-
-if __name__ == "__main__":
-    # 仅在直接运行时才启动 Telegram Bot 线程，避免部署平台导入模块时触发
-    threading.Thread(target=start_bot_thread, daemon=True).start()
-    port = int(os.getenv("PORT", "7860"))
-    logger.info(f"启动 Gradio/FastAPI 服务，监听 0.0.0.0:{port}")
-    uvicorn.run(fastapi_app, host="0.0.0.0", port=port, log_level="warning")
+                        await u.client.disconn
